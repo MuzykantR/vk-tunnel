@@ -16,6 +16,10 @@ type Adapter struct {
 func CreateAdapter(name string) (*Adapter, error) {
 	log.Printf("Initializing Wintun adapter: %s", name)
 
+	if err := ensureWintunDLL(); err != nil {
+		return nil, fmt.Errorf("wintun.dll: %w", err)
+	}
+
 	ifce, err := wintun.CreateAdapter(name, "Wintun", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create wintun adapter: %w", err)

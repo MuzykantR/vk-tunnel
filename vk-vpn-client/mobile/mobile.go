@@ -36,7 +36,7 @@ func StartVPN(uri string, fd int, vp8Fps int, vp8Batch int) error {
 	cancelFunc = cancel
 
 	// 2. Setup WebRTC
-	client, err := webrtc.NewClient(ctx, payload)
+	client, err := webrtc.NewClient(ctx, payload, 1080)
 	if err != nil {
 		cancel()
 		return err

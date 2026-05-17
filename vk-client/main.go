@@ -26,7 +26,7 @@ type App struct {
 
 func NewApp() *App {
 	return &App{
-		defaultGW: "192.168.1.1", // Mocked, use net/route to find actual GW
+		defaultGW: wintun.DefaultGateway(),
 		wintunIP:  "10.8.0.2",
 	}
 }
@@ -65,10 +65,13 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// 4. Setup gvisor Tun2Socks Engine
+	// 4. tun2socks: steer Wintun packets into local SOCKS5 (relay starts after WebRTC DC opens)
 	log.Println("Starting tun2socks engine...")
-	engine := tun2socks.NewEngine(a.wintunAdapter.Session(), "127.0.0.1:1080")
-	engine.Start()
+	tunEngine, err := tun2socks.MustStart("WLVPN", "127.0.0.1:1080")
+	if err != nil {
+		return err
+	}
+	_ = tunEngine
 
 	// 5. Setup Routing Bypass (CRITICAL loop prevention)
 	log.Println("Setting up routing bypass for VK SFU nodes...")

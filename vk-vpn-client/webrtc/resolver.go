@@ -41,10 +41,19 @@ func parseVKCaptchaError(errObj map[string]interface{}) *vkCaptchaError {
 	}
 }
 
+// JoinResult holds signaling URL and ICE servers from joinConversationByLink.
+type JoinResult struct {
+	WsURL      string
+	StunURLs   []string
+	TurnURLs   []string
+	TurnUser   string
+	TurnCred   string
+}
+
 // ResolveJoinLink performs HTTP requests to login.vk.com and api.vk.com
 // to get an anonymous token and resolve the joinLink into a WebSocket URL.
 // Captcha is handled autonomously via a local proxy + browser.
-func ResolveJoinLink(joinLink string) (string, error) {
+func ResolveJoinLink(joinLink string) (*JoinResult, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	httpPost := func(targetURL string, form url.Values, extraHeaders map[string]string) (map[string]interface{}, error) {
@@ -81,12 +90,12 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		"client_id": {appID},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("get_anonym_token: %w", err)
+		return nil, fmt.Errorf("get_anonym_token: %w", err)
 	}
 	dataMap, _ := anonResp["data"].(map[string]interface{})
 	accessToken, _ := dataMap["access_token"].(string)
 	if accessToken == "" {
-		return "", fmt.Errorf("empty access_token: %v", anonResp)
+		return nil, fmt.Errorf("empty access_token: %v", anonResp)
 	}
 	auth := map[string]string{"Authorization": "Bearer " + accessToken}
 
@@ -95,7 +104,7 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		"v": {apiVersion},
 	}, auth)
 	if err != nil {
-		return "", fmt.Errorf("calls.getSettings: %w", err)
+		return nil, fmt.Errorf("calls.getSettings: %w", err)
 	}
 	var pubKey string
 	if respObj, ok := settingsResp["response"].(map[string]interface{}); ok {
@@ -133,7 +142,7 @@ func ResolveJoinLink(joinLink string) (string, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		callResp, err := httpPost("https://api.vk.com/method/calls.getAnonymousToken", callParams, auth)
 		if err != nil {
-			return "", fmt.Errorf("getAnonymousToken: %w", err)
+			return nil, fmt.Errorf("getAnonymousToken: %w", err)
 		}
 
 		if errObj, hasErr := callResp["error"].(map[string]interface{}); hasErr {
@@ -141,14 +150,14 @@ func ResolveJoinLink(joinLink string) (string, error) {
 			if int(errCode) == 14 {
 				captchaErr := parseVKCaptchaError(errObj)
 				if captchaErr == nil {
-					return "", fmt.Errorf("captcha error missing fields: %v", errObj)
+					return nil, fmt.Errorf("captcha error missing fields: %v", errObj)
 				}
 
 				log.Println("Captcha required by VK. Launching browser for interactive verification...")
 
 				proxyPort := StartCaptchaProxy(captchaErr.redirectURI, nil)
 				if proxyPort == 0 {
-					return "", fmt.Errorf("failed to start captcha proxy")
+					return nil, fmt.Errorf("failed to start captcha proxy")
 				}
 
 				// Open the user's default browser
@@ -161,7 +170,7 @@ func ResolveJoinLink(joinLink string) (string, error) {
 				StopCaptchaProxy()
 
 				if successToken == "" {
-					return "", fmt.Errorf("captcha timed out or was not solved")
+					return nil, fmt.Errorf("captcha timed out or was not solved")
 				}
 
 				log.Println("Captcha solved successfully! Retrying API call...")
@@ -183,12 +192,12 @@ func ResolveJoinLink(joinLink string) (string, error) {
 				}
 				continue
 			}
-			return "", fmt.Errorf("VK API error: %v", errObj)
+			return nil, fmt.Errorf("VK API error: %v", errObj)
 		}
 
 		respMap, ok := callResp["response"].(map[string]interface{})
 		if !ok {
-			return "", fmt.Errorf("unexpected response: %v", callResp)
+			return nil, fmt.Errorf("unexpected response: %v", callResp)
 		}
 		callToken, _ = respMap["token"].(string)
 		apiBaseURL, _ = respMap["api_base_url"].(string)
@@ -200,7 +209,7 @@ func ResolveJoinLink(joinLink string) (string, error) {
 	}
 
 	if callToken == "" {
-		return "", fmt.Errorf("failed to get call token after retries")
+		return nil, fmt.Errorf("failed to get call token after retries")
 	}
 
 	// 5. OK.ru anonymLogin
@@ -224,11 +233,11 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		"format":          {"json"},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("anonymLogin: %w", err)
+		return nil, fmt.Errorf("anonymLogin: %w", err)
 	}
 	sessionKey, _ := okResp["session_key"].(string)
 	if sessionKey == "" {
-		return "", fmt.Errorf("missing session_key: %v", okResp)
+		return nil, fmt.Errorf("missing session_key: %v", okResp)
 	}
 
 	// 6. Join conversation
@@ -247,13 +256,35 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		"mediaSettings":   {string(ms)},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("joinConversation: %w", err)
+		return nil, fmt.Errorf("joinConversation: %w", err)
 	}
 	endpoint, _ := r["endpoint"].(string)
 	if endpoint == "" {
-		return "", fmt.Errorf("empty WS endpoint: %v", r)
+		return nil, fmt.Errorf("empty WS endpoint: %v", r)
 	}
 
-	wsURL := endpoint + "&platform=WEB&appVersion=1.1&version=6&device=browser&capabilities=0&clientType=VK&tgt=join"
-	return wsURL, nil
+	result := &JoinResult{
+		WsURL: endpoint + "&platform=WEB&appVersion=1.1&version=6&device=browser&capabilities=0&clientType=VK&tgt=join",
+	}
+	if turn, ok := r["turn_server"].(map[string]interface{}); ok {
+		result.TurnUser, _ = turn["username"].(string)
+		result.TurnCred, _ = turn["credential"].(string)
+		if urls, ok := turn["urls"].([]interface{}); ok {
+			for _, u := range urls {
+				if s, ok := u.(string); ok {
+					result.TurnURLs = append(result.TurnURLs, s)
+				}
+			}
+		}
+	}
+	if stun, ok := r["stun_server"].(map[string]interface{}); ok {
+		if urls, ok := stun["urls"].([]interface{}); ok {
+			for _, u := range urls {
+				if s, ok := u.(string); ok {
+					result.StunURLs = append(result.StunURLs, s)
+				}
+			}
+		}
+	}
+	return result, nil
 }

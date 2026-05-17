@@ -1,62 +1,67 @@
 package tun2socks
 
 import (
+	"fmt"
 	"log"
+	"sync"
 
-	"golang.zx2c4.com/wintun"
-	// "gvisor.dev/gvisor/pkg/tcpip"
-	// "gvisor.dev/gvisor/pkg/tcpip/stack"
-	// "gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	// "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
-	// "gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"github.com/xjasonlyu/tun2socks/v2/engine"
 )
 
-// Tun2Socks Engine maps the L3 packets from Wintun to L4 streams (TCP/UDP) using gvisor/netstack.
-// Then it dials the local SOCKS5 proxy and forwards the streams.
+// Engine forwards IP packets from a Wintun adapter to a local SOCKS5 proxy.
 type Engine struct {
-	session  wintun.Session
-	socksURL string
-	// stack *stack.Stack
+	adapterName string
+	socksURL    string
+	mu          sync.Mutex
+	started     bool
 }
 
-func NewEngine(session wintun.Session, socksURL string) *Engine {
+func NewEngine(adapterName, socksAddr string) *Engine {
 	return &Engine{
-		session:  session,
-		socksURL: socksURL,
+		adapterName: adapterName,
+		socksURL:    "socks5://" + socksAddr,
 	}
 }
 
 func (e *Engine) Start() error {
-	log.Println("Initializing gvisor netstack...")
-
-	// 1. Initialize gvisor stack with IPv4, TCP, UDP
-	// stackOpts := stack.Options{
-	// 	NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-	// 	TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
-	// }
-	// e.stack = stack.New(stackOpts)
-
-	// 2. Create a custom Endpoint endpoint that implements gvisor's LinkEndpoint.
-	// This endpoint reads packets from e.session (wintun) and injects them into e.stack,
-	// and takes packets from e.stack and writes them to e.session.
-
-	// 3. Set up TCP/UDP forwarders in gvisor.
-	// tcpForwarder := tcp.NewForwarder(e.stack, 0, 65535, func(r *tcp.ForwarderRequest) {
-	// 		var wq waiter.Queue
-	// 		ep, err := r.CreateEndpoint(&wq)
-	// 		if err != nil {
-	// 			r.Complete(true)
-	// 			return
-	// 		}
-	// 		r.Complete(false)
-	//      
-	//      // ep represents the intercepted TCP connection from the Windows OS.
-	// 		// We now dial the SOCKS5 proxy:
-	//      // socksConn, _ := proxy.Dial(e.socksURL)
-	//      // io.Copy(socksConn, ep) ...
-	// })
-	// e.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-
-	log.Println("gvisor netstack initialized and attached to Wintun.")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.started {
+		return nil
+	}
+	log.Printf("Starting tun2socks: device=tun://%s proxy=%s", e.adapterName, e.socksURL)
+	key := &engine.Key{
+		Device: "tun://" + e.adapterName,
+		Proxy:  e.socksURL,
+		MTU:    1500,
+	}
+	engine.Insert(key)
+	engine.Start()
+	e.started = true
+	log.Println("tun2socks engine running")
 	return nil
+}
+
+func (e *Engine) Stop() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.started {
+		return
+	}
+	engine.Stop()
+	e.started = false
+	log.Println("tun2socks engine stopped")
+}
+
+// Legacy constructor kept for compatibility during migration.
+func NewEngineFromSession(_ interface{}, socksURL string) *Engine {
+	return &Engine{adapterName: "WLVPN", socksURL: "socks5://" + socksURL}
+}
+
+func MustStart(adapterName, socksHostPort string) (*Engine, error) {
+	eng := NewEngine(adapterName, socksHostPort)
+	if err := eng.Start(); err != nil {
+		return nil, fmt.Errorf("tun2socks: %w", err)
+	}
+	return eng, nil
 }

@@ -24,8 +24,11 @@ func SetupRoutingLoopBypass(defaultGateway string) error {
 	// List of domains or IPs that must bypass the VPN tunnel (direct route).
 	vkDomains := []string{
 		"vk.com",
+		"vk.ru",
+		"okcdn.ru",
+		"mycdn.me",
 		"stun.l.google.com",
-		// Add specific signaling or SFU IPs here
+		"stun.vk.com",
 	}
 
 	for _, domain := range vkDomains {

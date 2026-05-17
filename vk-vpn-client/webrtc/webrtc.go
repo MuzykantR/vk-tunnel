@@ -3,113 +3,150 @@ package webrtc
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log"
-	"net"
+	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
 	"github.com/vk-vpn/client/parser"
+	"github.com/vk-vpn/client/socks"
+	"github.com/vk-vpn/client/tunnel"
 )
 
 type Client struct {
-	pc      *webrtc.PeerConnection
-	dc      *webrtc.DataChannel
-	ctx     context.Context
-	payload *parser.VPNPayload
-	wsConn  *websocket.Conn
-	mu      sync.Mutex
-	conn    net.Conn // Active SOCKS5/Tunnel connection
-	vkSeq   int
-	peerID  float64
+	pc         *webrtc.PeerConnection
+	dc         *webrtc.DataChannel
+	ctx        context.Context
+	payload    *parser.VPNPayload
+	wsConn     *websocket.Conn
+	mu         sync.Mutex
+	vkSeq      int
+	peerID     int64
+	join       *JoinResult
+	remoteSet  bool
+	pendingICE []webrtc.ICECandidateInit
+	readyCh    chan struct{}
+	readyOnce  sync.Once
+	socksPort  int
 }
 
-func NewClient(ctx context.Context, payload *parser.VPNPayload) (*Client, error) {
-	log.Printf("Initializing WebRTC Joiner for link: %s", payload.Link)
-
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
-	}
-
-	pc, err := webrtc.NewPeerConnection(config)
-	if err != nil {
-		return nil, err
-	}
-
-	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("Client ICE Connection State: %s\n", state.String())
-	})
-
+func NewClient(ctx context.Context, payload *parser.VPNPayload, socksPort int) (*Client, error) {
 	return &Client{
-		pc:      pc,
-		ctx:     ctx,
-		payload: payload,
+		ctx:       ctx,
+		payload:   payload,
+		readyCh:   make(chan struct{}),
+		socksPort: socksPort,
 	}, nil
 }
 
-// sendVK is a helper to send formatted JSON commands to VK SFU
-func (c *Client) sendVK(command string, data interface{}) {
+func (c *Client) Ready() <-chan struct{} {
+	return c.readyCh
+}
+
+func (c *Client) vkSend(command string, extra map[string]interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.wsConn == nil {
 		return
 	}
 	c.vkSeq++
-	msg := map[string]interface{}{
-		"command":  command,
-		"sequence": c.vkSeq,
+	seq := c.vkSeq
+	var out []byte
+	if pid, ok := extra["participantId"]; ok {
+		dataJSON, _ := json.Marshal(extra["data"])
+		out = []byte(fmt.Sprintf(`{"command":%q,"sequence":%d,"participantId":%v,"data":%s}`,
+			command, seq, pid, dataJSON))
+	} else {
+		extra["command"] = command
+		extra["sequence"] = seq
+		out, _ = json.Marshal(extra)
 	}
-	if data != nil && c.peerID != 0 {
-		msg["participantId"] = c.peerID
-		msg["data"] = data
-	}
-	c.wsConn.WriteJSON(msg)
+	c.wsConn.WriteMessage(websocket.TextMessage, out)
 }
 
-// Connect establishes real connection to VK SFU WebSocket and handles signaling
+func (c *Client) vkSendTransmit(participantID int64, data map[string]interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wsConn == nil {
+		return
+	}
+	c.vkSeq++
+	dataJSON, _ := json.Marshal(data)
+	out := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":%s,"participantType":"USER"}`,
+		c.vkSeq, participantID, dataJSON)
+	c.wsConn.WriteMessage(websocket.TextMessage, []byte(out))
+}
+
+func buildICEServers(join *JoinResult) []webrtc.ICEServer {
+	var servers []webrtc.ICEServer
+	if len(join.StunURLs) > 0 {
+		servers = append(servers, webrtc.ICEServer{URLs: join.StunURLs})
+	}
+	if len(join.TurnURLs) > 0 {
+		urls := append([]string{}, join.TurnURLs...)
+		urls = append(urls, urls[len(urls)-1]+"?transport=tcp")
+		servers = append(servers, webrtc.ICEServer{
+			URLs:       urls,
+			Username:   join.TurnUser,
+			Credential: join.TurnCred,
+		})
+	}
+	if len(servers) == 0 {
+		servers = append(servers, webrtc.ICEServer{URLs: []string{"stun:stun.l.google.com:19302"}})
+	}
+	return servers
+}
+
 func (c *Client) Connect() error {
 	log.Println("Setting up WebRTC tracks and DataChannels for VK SFU...")
-
-	// Resolve the HTTP link to a WebSocket URL
 	log.Println("Resolving join link via VK HTTP API...")
-	wsURL, err := ResolveJoinLink(c.payload.Link)
+
+	join, err := ResolveJoinLink(c.payload.Link)
 	if err != nil {
-		return err // Could be CAPTCHA_REQUIRED error
+		return err
 	}
+	c.join = join
 
-	// 1. Create fake Audio Opus track
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-		"audio", "tunnel-audio",
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.DetachDataChannels()
+
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: buildICEServers(join)})
+	if err != nil {
+		return err
+	}
+	c.pc = pc
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("Client ICE state: %s", state.String())
+	})
+
+	audioTrack, _ := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "tunnel-audio",
 	)
-	if err == nil {
-		c.pc.AddTrack(audioTrack)
+	if audioTrack != nil {
+		pc.AddTrack(audioTrack)
 	}
-
-	// 2. Create fake Video VP8 track
-	videoTrack, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
-		"video", "tunnel-video",
+	videoTrack, _ := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "tunnel-video",
 	)
-	if err == nil {
-		c.pc.AddTrack(videoTrack)
+	if videoTrack != nil {
+		pc.AddTrack(videoTrack)
 	}
 
-	// 3. Create VK-specific DataChannels
 	ordered := true
-	c.pc.CreateDataChannel("producerNotification", &webrtc.DataChannelInit{Ordered: &ordered})
-	c.pc.CreateDataChannel("producerCommand", &webrtc.DataChannelInit{Ordered: &ordered})
-	c.pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
-	c.pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
+	pc.CreateDataChannel("producerNotification", &webrtc.DataChannelInit{Ordered: &ordered})
+	pc.CreateDataChannel("producerCommand", &webrtc.DataChannelInit{Ordered: &ordered})
+	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
+	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
-	// 4. Create the actual tunnel DataChannel (Negotiated: true, ID: 2)
 	negotiated := true
 	dcID := uint16(2)
-	dc, err := c.pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
+	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
 		Negotiated: &negotiated,
 		ID:         &dcID,
 	})
@@ -118,151 +155,163 @@ func (c *Client) Connect() error {
 	}
 	c.dc = dc
 
-	c.dc.OnOpen(func() {
-		log.Printf("Client DataChannel '%s' is open. VPN tunnel ready.", c.dc.Label())
+	dc.OnOpen(func() {
+		log.Println("Tunnel DataChannel open — starting SOCKS5 relay")
+		dt := tunnel.NewDCTunnel(dc, socks.DCBufSize, log.Printf)
+		bridge := tunnel.NewRelayBridge(dt, "joiner", log.Printf)
+		bridge.MarkReady()
+		c.readyOnce.Do(func() { close(c.readyCh) })
+		go func() {
+			addr := fmt.Sprintf("127.0.0.1:%d", c.socksPort)
+			if err := bridge.ListenSOCKS(addr); err != nil {
+				log.Printf("SOCKS5 relay error: %v", err)
+			}
+		}()
 	})
 
-	c.dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn != nil {
-			conn.Write(msg.Data)
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil || c.peerID == 0 {
+			return
 		}
+		candJSON, _ := json.Marshal(candidate.ToJSON())
+		var parsed interface{}
+		json.Unmarshal(candJSON, &parsed)
+		c.vkSendTransmit(c.peerID, map[string]interface{}{"candidate": parsed})
 	})
 
-	// 5. Connect to VK WebSocket
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	wsConn, _, err := dialer.DialContext(c.ctx, wsURL, nil)
+	header := http.Header{}
+	header.Set("Origin", "https://vk.com")
+	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	wsConn, _, err := (&websocket.Dialer{HandshakeTimeout: 15 * time.Second}).DialContext(c.ctx, join.WsURL, header)
 	if err != nil {
-		return err
+		return fmt.Errorf("websocket dial: %w", err)
 	}
 	c.wsConn = wsConn
 	log.Println("Connected to VK WebSocket successfully")
 
-	// 6. Handle local ICE candidates
-	c.pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil || c.peerID == 0 {
-			return
-		}
-		c.sendVK("transmit-data", map[string]interface{}{
-			"candidate": candidate.ToJSON(),
-		})
+	c.vkSend("update-media-modifiers", map[string]interface{}{
+		"mediaModifiers": map[string]interface{}{"denoise": true, "denoiseAnn": true},
+	})
+	c.vkSend("change-media-settings", map[string]interface{}{
+		"mediaSettings": map[string]interface{}{
+			"isAudioEnabled": false, "isVideoEnabled": true,
+			"isScreenSharingEnabled": false, "isFastScreenSharingEnabled": false,
+			"isAudioSharingEnabled": false, "isAnimojiEnabled": false,
+		},
 	})
 
-	// 7. Start reading loop for VK JSON signaling
-	go func() {
-		for {
-			_, msg, err := c.wsConn.ReadMessage()
-			if err != nil {
-				log.Printf("VK WS read error: %v", err)
-				return
-			}
-
-			if string(msg) == "ping" {
-				c.mu.Lock()
-				c.wsConn.WriteMessage(websocket.TextMessage, []byte("pong"))
-				c.mu.Unlock()
-				continue
-			}
-
-			var parsed map[string]interface{}
-			if err := json.Unmarshal(msg, &parsed); err != nil {
-				continue
-			}
-
-			msgType, _ := parsed["type"].(string)
-			if msgType == "notification" {
-				notif, _ := parsed["notification"].(string)
-				
-				// Capture Participant ID for sending back data
-				if notif == "registered-peer" || notif == "transmitted-data" {
-					if pid, ok := parsed["participantId"].(float64); ok {
-						c.peerID = pid
-					}
-				}
-
-				if notif == "transmitted-data" {
-					data, _ := parsed["data"].(map[string]interface{})
-					
-					// Handle SDP Offer
-					if sdpObj, ok := data["sdp"].(map[string]interface{}); ok {
-						sdpType, _ := sdpObj["type"].(string)
-						sdpStr, _ := sdpObj["sdp"].(string)
-
-						if sdpType == "offer" {
-							err := c.pc.SetRemoteDescription(webrtc.SessionDescription{
-								Type: webrtc.SDPTypeOffer,
-								SDP:  sdpStr,
-							})
-							if err != nil {
-								log.Printf("SetRemoteDescription error: %v", err)
-								continue
-							}
-
-							ans, err := c.pc.CreateAnswer(nil)
-							if err != nil {
-								log.Printf("CreateAnswer error: %v", err)
-								continue
-							}
-							c.pc.SetLocalDescription(ans)
-
-							c.sendVK("transmit-data", map[string]interface{}{
-								"sdp": map[string]interface{}{
-									"type": "answer",
-									"sdp":  ans.SDP,
-								},
-								"animojiVersion": 2,
-							})
-							log.Println("Sent SDP Answer back to VK SFU")
-						}
-					}
-
-					// Handle Remote ICE Candidates
-					if candObj, ok := data["candidate"]; ok {
-						candJSON, _ := json.Marshal(candObj)
-						var iceCand webrtc.ICECandidateInit
-						if err := json.Unmarshal(candJSON, &iceCand); err == nil {
-							c.pc.AddICECandidate(iceCand)
-						}
-					}
-				}
-			}
-		}
-	}()
-
+	go c.readLoop()
 	return nil
 }
 
-// HandleSOCKS5Conn bridges a local SOCKS5 TCP connection to the WebRTC tunnel.
-func (c *Client) HandleSOCKS5Conn(conn net.Conn) {
-	log.Printf("New local SOCKS5 connection from %s, bridging to WebRTC...", conn.RemoteAddr())
+func (c *Client) readLoop() {
+	for {
+		_, msg, err := c.wsConn.ReadMessage()
+		if err != nil {
+			log.Printf("VK WS read error: %v", err)
+			return
+		}
+		if string(msg) == "ping" {
+			c.mu.Lock()
+			c.wsConn.WriteMessage(websocket.TextMessage, []byte("pong"))
+			c.mu.Unlock()
+			continue
+		}
+		c.handleVKMessage(msg)
+	}
+}
 
-	c.mu.Lock()
-	c.conn = conn
-	c.mu.Unlock()
-
-	go func() {
-		defer conn.Close()
-		buf := make([]byte, 16*1024) // 16KB chunks
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("SOCKS5 read error: %v", err)
-				}
-				break
-			}
-			
-			if c.dc != nil && c.dc.ReadyState() == webrtc.DataChannelStateOpen {
-				err = c.dc.Send(buf[:n])
-				if err != nil {
-					log.Printf("DataChannel send error: %v", err)
-					break
+func (c *Client) handleVKMessage(raw []byte) {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	if msg["type"] != "notification" {
+		return
+	}
+	notif, _ := msg["notification"].(string)
+	switch notif {
+	case "registered-peer":
+		if pid, ok := msg["participantId"].(float64); ok {
+			c.peerID = int64(pid)
+			log.Printf("Registered peer ID: %d", c.peerID)
+		}
+	case "transmitted-data":
+		if pid, ok := msg["participantId"].(float64); ok && c.peerID == 0 {
+			c.peerID = int64(pid)
+		}
+		data, _ := msg["data"].(map[string]interface{})
+		if data == nil {
+			return
+		}
+		if candObj, ok := data["candidate"]; ok {
+			candJSON, _ := json.Marshal(candObj)
+			var ice webrtc.ICECandidateInit
+			if json.Unmarshal(candJSON, &ice) == nil {
+				if c.remoteSet {
+					c.pc.AddICECandidate(ice)
+				} else {
+					c.pendingICE = append(c.pendingICE, ice)
 				}
 			}
 		}
-	}()
+		if sdpObj, ok := data["sdp"].(map[string]interface{}); ok {
+			sdpType, _ := sdpObj["type"].(string)
+			sdpStr, _ := sdpObj["sdp"].(string)
+			if sdpType == "offer" {
+				c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sdpStr})
+				c.remoteSet = true
+				for _, ice := range c.pendingICE {
+					c.pc.AddICECandidate(ice)
+				}
+				c.pendingICE = nil
+
+				ans, err := c.pc.CreateAnswer(nil)
+				if err != nil || c.peerID == 0 {
+					log.Printf("CreateAnswer failed: %v", err)
+					return
+				}
+				c.pc.SetLocalDescription(ans)
+				sdpJSON, _ := json.Marshal(ans.SDP)
+				c.mu.Lock()
+				if c.wsConn != nil {
+					c.vkSeq++
+					raw := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":{"sdp":{"sdp":%s,"type":%q},"animojiVersion":2},"participantType":"USER"}`,
+						c.vkSeq, c.peerID, sdpJSON, ans.Type.String())
+					c.wsConn.WriteMessage(websocket.TextMessage, []byte(raw))
+					log.Println("Sent SDP answer to VK SFU")
+				}
+				c.mu.Unlock()
+			}
+		}
+	case "connection":
+		if params, ok := msg["conversationParams"].(map[string]interface{}); ok {
+			if turn, ok := params["turn"].(map[string]interface{}); ok {
+				c.updateTURN(turn)
+			}
+		}
+	}
+}
+
+func (c *Client) updateTURN(turn map[string]interface{}) {
+	urlsRaw, _ := turn["urls"].([]interface{})
+	var urls []string
+	for _, u := range urlsRaw {
+		if s, ok := u.(string); ok {
+			urls = append(urls, s)
+		}
+	}
+	user, _ := turn["username"].(string)
+	cred, _ := turn["credential"].(string)
+	if len(urls) == 0 {
+		return
+	}
+	urls = append(urls, urls[len(urls)-1]+"?transport=tcp")
+	_ = c.pc.SetConfiguration(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: urls, Username: user, Credential: cred}},
+	})
+	log.Printf("Updated TURN servers: %v", urls)
 }
 
 func (c *Client) Close() {
@@ -272,4 +321,10 @@ func (c *Client) Close() {
 	if c.wsConn != nil {
 		c.wsConn.Close()
 	}
+	StopCaptchaProxy()
+}
+
+// OpenCaptchaBrowser opens the local captcha proxy in the default browser.
+func OpenCaptchaBrowser(port int) {
+	exec.Command("cmd", "/c", "start", fmt.Sprintf("http://127.0.0.1:%d/", port)).Run()
 }
