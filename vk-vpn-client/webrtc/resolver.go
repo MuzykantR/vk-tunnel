@@ -41,19 +41,25 @@ func parseVKCaptchaError(errObj map[string]interface{}) *vkCaptchaError {
 	}
 }
 
-// JoinResult holds signaling URL and ICE servers from joinConversationByLink.
-type JoinResult struct {
-	WsURL      string
-	StunURLs   []string
-	TurnURLs   []string
-	TurnUser   string
-	TurnCred   string
+// AuthParams — результат auth/join, как RunVKAuth в whitelist-bypass.
+type AuthParams struct {
+	SessionKey      string   `json:"sessionKey"`
+	ApplicationKey  string   `json:"applicationKey"`
+	APIBaseURL      string   `json:"apiBaseURL"`
+	JoinLink        string   `json:"joinLink"`
+	AnonymToken     string   `json:"anonymToken"`
+	AppVersion      string   `json:"appVersion"`
+	ProtocolVersion string   `json:"protocolVersion"`
+	StunURLs        []string `json:"-"`
+	TurnURLs        []string `json:"-"`
+	TurnUser        string   `json:"-"`
+	TurnCred        string   `json:"-"`
 }
 
 // ResolveJoinLink performs HTTP requests to login.vk.com and api.vk.com
 // to get an anonymous token and resolve the joinLink into a WebSocket URL.
 // Captcha is handled autonomously via a local proxy + browser.
-func ResolveJoinLink(joinLink string) (*JoinResult, error) {
+func ResolveJoinLink(joinLink string) (*AuthParams, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	httpPost := func(targetURL string, form url.Values, extraHeaders map[string]string) (map[string]interface{}, error) {
@@ -263,8 +269,14 @@ func ResolveJoinLink(joinLink string) (*JoinResult, error) {
 		return nil, fmt.Errorf("empty WS endpoint: %v", r)
 	}
 
-	result := &JoinResult{
-		WsURL: endpoint + "&platform=WEB&appVersion=1.1&version=6&device=browser&capabilities=0&clientType=VK&tgt=join",
+	result := &AuthParams{
+		SessionKey:      sessionKey,
+		ApplicationKey:  pubKey,
+		APIBaseURL:      baseURL,
+		JoinLink:        okJoinLink,
+		AnonymToken:     callToken,
+		AppVersion:      appVersion,
+		ProtocolVersion: "6",
 	}
 	if turn, ok := r["turn_server"].(map[string]interface{}); ok {
 		result.TurnUser, _ = turn["username"].(string)
@@ -286,5 +298,6 @@ func ResolveJoinLink(joinLink string) (*JoinResult, error) {
 			}
 		}
 	}
+	_ = endpoint // joiner повторно вызывает joinConversationByLink в joinCall()
 	return result, nil
 }

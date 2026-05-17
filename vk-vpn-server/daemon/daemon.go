@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vk-vpn/server/config"
+	"github.com/vk-vpn/server/creator"
 	"github.com/vk-vpn/server/signaling"
 	"github.com/vk-vpn/server/webrtc"
 )
@@ -42,12 +43,9 @@ func (d *Daemon) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Daemon stopped by context.")
 			return
 		default:
-			log.Println("Initiating new call session...")
 			d.runSession(ctx)
-			log.Println("Session ended. Reconnecting in 3 seconds...")
 			select {
 			case <-time.After(3 * time.Second):
 			case <-ctx.Done():
@@ -57,56 +55,45 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) runSession(parentCtx context.Context) {
-	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+func (d *Daemon) runSession(ctx context.Context) {
+	log.Println("Initiating new call session...")
 
 	vkSig := signaling.NewVKSignaling(d.cookies)
 	defer vkSig.Close()
 
-	peerID := "2000000001"
-	wsURL, rawLink, joinBody, err := vkSig.FetchCallURL(ctx, peerID)
+	wsURL, rawLink, joinBody, err := vkSig.FetchCallURL(ctx, "2000000001")
 	if err != nil {
 		log.Printf("Failed to fetch call URL: %v", err)
 		return
 	}
-
 	d.setLinkInfo(rawLink)
 	log.Printf("New Call created! Active link: %s", rawLink)
 
 	ice := webrtc.ParseICEFromJoin(joinBody)
-	host := webrtc.NewHost(ice)
-	// Handler must be registered before WS readLoop starts (otherwise early SFU messages are lost).
-	vkSig.SetNotificationHandler(host.HandleNotification)
-
-	if err := vkSig.Connect(ctx, wsURL); err != nil {
-		log.Printf("Failed to connect to signaling: %v", err)
+	bridge, err := creator.NewBridge(wsURL, ice, "1.1", "6")
+	if err != nil {
+		log.Printf("Failed to create creator bridge: %v", err)
 		return
 	}
-	host.AttachWS(vkSig.WSConn())
+	defer bridge.Close()
 
-	if err := host.Start(); err != nil {
-		log.Printf("Failed to start WebRTC host: %v", err)
+	if err := bridge.Connect(); err != nil {
+		log.Printf("Failed to connect WS: %v", err)
 		return
 	}
-	defer host.Close()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-vkSig.EventChan:
-			if !ok {
-				log.Println("Signaling channel closed.")
-				return
-			}
-			if event["type"] == "topology" {
-				mode, _ := event["mode"].(string)
-				log.Printf("Topology changed to: %s", mode)
-				if mode == "SERVER" {
-					log.Println("VK SFU server topology active (expected for join links)")
-				}
-			}
-		}
+	log.Println("Creator bridge running (whitelist-bypass DIRECT P2P mode)")
+
+	done := make(chan struct{})
+	go func() {
+		bridge.Run()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		bridge.Close()
+	case <-done:
+		log.Println("Creator bridge WS closed")
 	}
 }

@@ -11,50 +11,48 @@ import (
 )
 
 var (
-	activeClient *webrtc.Client
+	activeJoiner *webrtc.Joiner
 	cancelFunc   context.CancelFunc
 )
 
-// StartClient connects to VK SFU, waits for the tunnel DataChannel, then exposes SOCKS5.
 func StartClient(uri string, socksPort int) error {
-	if activeClient != nil {
+	if activeJoiner != nil {
 		return fmt.Errorf("client is already running")
 	}
 
-	log.Printf("StartClient called with URI: %s", uri)
-
 	payload, err := parser.ParseAndDecryptURI(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse URI: %w", err)
+		return fmt.Errorf("parse URI: %w", err)
 	}
 	log.Printf("Successfully decrypted URI. Link: %s", payload.Link)
+
+	auth, err := webrtc.ResolveJoinLink(payload.Link)
+	if err != nil {
+		return fmt.Errorf("VK auth: %w", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelFunc = cancel
 
-	client, err := webrtc.NewClient(ctx, payload, socksPort)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("failed to init WebRTC: %w", err)
-	}
-	activeClient = client
+	joiner := webrtc.NewJoiner(ctx, auth, socksPort)
+	activeJoiner = joiner
 
-	if err := client.Connect(); err != nil {
-		cancel()
-		activeClient = nil
-		return fmt.Errorf("failed to connect WebRTC: %w", err)
-	}
+	go func() {
+		if err := joiner.Run(); err != nil {
+			log.Printf("Joiner exited: %v", err)
+		}
+	}()
 
 	select {
-	case <-client.Ready():
-		log.Println("VPN tunnel DataChannel ready, SOCKS5 relay active")
+	case <-joiner.Ready():
+		log.Println("VPN tunnel DataChannel ready")
 		return nil
 	case <-time.After(120 * time.Second):
 		cancel()
-		activeClient = nil
-		return fmt.Errorf("timeout waiting for tunnel DataChannel (WebRTC may not have connected)")
+		activeJoiner = nil
+		return fmt.Errorf("timeout waiting for tunnel DataChannel")
 	case <-ctx.Done():
-		return fmt.Errorf("client cancelled")
+		return fmt.Errorf("cancelled")
 	}
 }
 
@@ -63,9 +61,9 @@ func StopClient() {
 		cancelFunc()
 		cancelFunc = nil
 	}
-	if activeClient != nil {
-		activeClient.Close()
-		activeClient = nil
+	if activeJoiner != nil {
+		activeJoiner.Close()
+		activeJoiner = nil
 		log.Println("VPN Client stopped.")
 	}
 }

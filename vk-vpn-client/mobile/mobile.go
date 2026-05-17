@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	activeClient *webrtc.Client
+	activeJoiner *webrtc.Joiner
 	cancelFunc   context.CancelFunc
 )
 
@@ -20,7 +20,7 @@ var (
 // fd: The raw File Descriptor of the TUN interface created by Android's VpnService.
 // vp8Fps, vp8Batch: Parameters for obfsucation pacing.
 func StartVPN(uri string, fd int, vp8Fps int, vp8Batch int) error {
-	if activeClient != nil {
+	if activeJoiner != nil {
 		return fmt.Errorf("VPN is already running")
 	}
 
@@ -36,18 +36,14 @@ func StartVPN(uri string, fd int, vp8Fps int, vp8Batch int) error {
 	cancelFunc = cancel
 
 	// 2. Setup WebRTC
-	client, err := webrtc.NewClient(ctx, payload, 1080)
+	auth, err := webrtc.ResolveJoinLink(payload.Link)
 	if err != nil {
 		cancel()
 		return err
 	}
-	activeClient = client
-
-	// 3. Connect WebRTC (Mock)
-	if err := activeClient.Connect(); err != nil {
-		cancel()
-		return err
-	}
+	joiner := webrtc.NewJoiner(ctx, auth, 1080)
+	activeJoiner = joiner
+	go joiner.Run()
 
 	// 4. Wrap the TUN file descriptor for gVisor
 	// os.NewFile creates an *os.File from the raw integer FD passed from Kotlin.
@@ -77,9 +73,9 @@ func StopVPN() {
 		cancelFunc()
 		cancelFunc = nil
 	}
-	if activeClient != nil {
-		activeClient.Close()
-		activeClient = nil
+	if activeJoiner != nil {
+		activeJoiner.Close()
+		activeJoiner = nil
 	}
 }
 
