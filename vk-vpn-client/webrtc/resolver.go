@@ -209,12 +209,13 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		baseURL += "/fb.do"
 	}
 	deviceID := fmt.Sprintf("%d", rand.Int63n(9e18))
+	// session_data must NOT include auth_token — OK.ru rejects it (error 100).
+	// The call token is passed separately as anonymToken in joinConversationByLink.
 	sessionData, _ := json.Marshal(map[string]interface{}{
 		"version":        2,
 		"device_id":      deviceID,
 		"client_version": appVersion,
 		"client_type":    "SDK_JS",
-		"auth_token":     callToken,
 	})
 	okResp, err := httpPost(baseURL, url.Values{
 		"method":          {"auth.anonymLogin"},
@@ -240,6 +241,7 @@ func ResolveJoinLink(joinLink string) (string, error) {
 		"application_key": {pubKey},
 		"format":          {"json"},
 		"joinLink":        {okJoinLink},
+		"anonymToken":     {callToken},
 		"isVideo":         {"true"},
 		"isAudio":         {"false"},
 		"mediaSettings":   {string(ms)},
