@@ -202,7 +202,21 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
-	if msg["type"] != "notification" {
+	msgType, _ := msg["type"].(string)
+	switch msgType {
+	case "notification":
+		// handled below
+	case "response":
+		seq, _ := msg["sequence"].(float64)
+		log.Printf("[vk-ws] <- response seq=%d", int(seq))
+		return
+	case "error":
+		errMsg, _ := msg["message"].(string)
+		errCode, _ := msg["error"].(string)
+		log.Printf("[vk-ws] <- ERROR: %s %s", errCode, errMsg)
+		return
+	default:
+		log.Printf("[vk-ws] <- unknown type: %s", msgType)
 		return
 	}
 	notif, _ := msg["notification"].(string)

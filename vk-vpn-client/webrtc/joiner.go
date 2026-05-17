@@ -3,9 +3,12 @@ package webrtc
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,8 +17,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
-	"github.com/vk-vpn/client/socks"
-	"github.com/vk-vpn/client/tunnel"
 )
 
 // Joiner — headless VK joiner (whitelist-bypass vk_joiner.go), DC tunnel mode.
@@ -42,14 +43,20 @@ type Joiner struct {
 	dc           *webrtc.DataChannel
 	remoteSet    bool
 	pendingICE   []webrtc.ICECandidateInit
+	answerSent   bool
+	mu           sync.Mutex
+	socksConns   map[uint32]net.Conn
+	connIDSeq    uint32
+	connIDMu     sync.Mutex
 }
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 	return &Joiner{
-		auth:      auth,
-		socksPort: socksPort,
-		readyCh:   make(chan struct{}),
-		ctx:       ctx,
+		auth:       auth,
+		socksPort:  socksPort,
+		readyCh:    make(chan struct{}),
+		ctx:        ctx,
+		socksConns: make(map[uint32]net.Conn),
 	}
 }
 
@@ -159,6 +166,15 @@ func (j *Joiner) connectSFU() {
 	j.readLoop()
 }
 
+// DC framed protocol constants (compatible with whitelist-bypass)
+const (
+	msgConnect    byte = 0x01
+	msgConnectOK  byte = 0x02
+	msgConnectErr byte = 0x03
+	msgData       byte = 0x04
+	msgClose      byte = 0x05
+)
+
 func (j *Joiner) initPC() {
 	if j.pc != nil {
 		return
@@ -172,10 +188,9 @@ func (j *Joiner) initPC() {
 		urls = append(urls, urls[len(urls)-1]+"?transport=tcp")
 		ice = append(ice, webrtc.ICEServer{URLs: urls, Username: j.joinResp.TurnUser, Credential: j.joinResp.TurnCred})
 	}
-	se := webrtc.SettingEngine{}
-	se.DetachDataChannels()
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
+
+	// Use default NewPeerConnection — it registers all standard codecs (VP8, Opus)
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 	if err != nil {
 		log.Printf("Joiner: PC failed: %v", err)
 		return
@@ -184,6 +199,9 @@ func (j *Joiner) initPC() {
 
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		log.Printf("Client ICE state: %s", s.String())
+	})
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		log.Printf("Client connection state: %s", s.String())
 	})
 
 	audio, _ := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "a")
@@ -208,12 +226,12 @@ func (j *Joiner) initPC() {
 	}
 	j.dc = dc
 	dc.OnOpen(func() {
-		log.Println("Tunnel DataChannel open — starting SOCKS5 relay")
-		dt := tunnel.NewDCTunnel(dc, socks.DCBufSize, log.Printf)
-		bridge := tunnel.NewRelayBridge(dt, "joiner", log.Printf)
-		bridge.MarkReady()
+		log.Println("VPN tunnel DataChannel open")
 		j.readyOnce.Do(func() { close(j.readyCh) })
-		go bridge.ListenSOCKS(fmt.Sprintf("127.0.0.1:%d", j.socksPort))
+		go j.listenSOCKS()
+	})
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		j.handleDCMessage(msg.Data)
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -223,6 +241,141 @@ func (j *Joiner) initPC() {
 		j.vkSendTransmit(*j.remotePeerID, map[string]interface{}{"candidate": c.ToJSON()})
 	})
 	log.Println("Joiner: PC ready, waiting for offer")
+}
+
+// ---------- DC Relay (joiner side) ----------
+
+func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
+	if j.dc == nil {
+		return
+	}
+	buf := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(buf[0:4], connID)
+	buf[4] = mt
+	copy(buf[5:], payload)
+	j.dc.Send(buf)
+}
+
+func (j *Joiner) handleDCMessage(data []byte) {
+	if len(data) < 5 {
+		return
+	}
+	connID := binary.BigEndian.Uint32(data[0:4])
+	mt := data[4]
+	payload := data[5:]
+
+	switch mt {
+	case msgConnectOK:
+		log.Printf("[socks] conn %d: connect OK", connID)
+	case msgConnectErr:
+		log.Printf("[socks] conn %d: connect error: %s", connID, string(payload))
+	case msgData:
+		j.mu.Lock()
+		conn := j.socksConns[connID]
+		j.mu.Unlock()
+		if conn != nil {
+			conn.Write(payload)
+		}
+	case msgClose:
+		j.mu.Lock()
+		conn := j.socksConns[connID]
+		delete(j.socksConns, connID)
+		j.mu.Unlock()
+		if conn != nil {
+			conn.Close()
+		}
+	}
+}
+
+func (j *Joiner) listenSOCKS() {
+	addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("SOCKS5 listen failed: %v", err)
+		return
+	}
+	log.Printf("SOCKS5 proxy listening on %s", addr)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go j.handleSOCKS(conn)
+	}
+}
+
+func (j *Joiner) handleSOCKS(conn net.Conn) {
+	// SOCKS5 handshake
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if err != nil || n < 2 || buf[0] != 0x05 {
+		conn.Close()
+		return
+	}
+	conn.Write([]byte{0x05, 0x00}) // no auth
+
+	n, err = conn.Read(buf)
+	if err != nil || n < 7 || buf[1] != 0x01 {
+		conn.Close()
+		return
+	}
+	var target string
+	switch buf[3] {
+	case 0x01: // IPv4
+		if n < 10 {
+			conn.Close()
+			return
+		}
+		ip := net.IP(buf[4:8])
+		port := binary.BigEndian.Uint16(buf[8:10])
+		target = fmt.Sprintf("%s:%d", ip.String(), port)
+	case 0x03: // Domain
+		domainLen := int(buf[4])
+		if n < 5+domainLen+2 {
+			conn.Close()
+			return
+		}
+		domain := string(buf[5 : 5+domainLen])
+		port := binary.BigEndian.Uint16(buf[5+domainLen : 5+domainLen+2])
+		target = fmt.Sprintf("%s:%d", domain, port)
+	default:
+		conn.Close()
+		return
+	}
+
+	// Send CONNECT to creator via DC
+	j.connIDMu.Lock()
+	j.connIDSeq++
+	connID := j.connIDSeq
+	j.connIDMu.Unlock()
+
+	j.mu.Lock()
+	j.socksConns[connID] = conn
+	j.mu.Unlock()
+
+	j.sendDCFrame(connID, msgConnect, []byte(target))
+
+	// Reply success to SOCKS5 client immediately
+	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+
+	// Read from local conn -> send to DC
+	rbuf := make([]byte, 32768)
+	for {
+		n, err := conn.Read(rbuf)
+		if n > 0 {
+			j.sendDCFrame(connID, msgData, rbuf[:n])
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[socks] conn %d read error: %v", connID, err)
+			}
+			break
+		}
+	}
+	j.sendDCFrame(connID, msgClose, nil)
+	j.mu.Lock()
+	delete(j.socksConns, connID)
+	j.mu.Unlock()
 }
 
 func (j *Joiner) onRegisteredPeer(pid int64) {
@@ -248,7 +401,7 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 	if sdp, ok := data["sdp"].(map[string]interface{}); ok {
 		sdpType, _ := sdp["type"].(string)
 		sdpStr, _ := sdp["sdp"].(string)
-		log.Printf("Remote SDP: %s", sdpType)
+		log.Printf("Remote SDP: %s (answerSent=%v)", sdpType, j.answerSent)
 		if sdpType == "answer" {
 			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdpStr})
 			j.remoteSet = true
@@ -257,6 +410,11 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 			}
 			j.pendingICE = nil
 		} else if sdpType == "offer" {
+			// Only process the first offer — duplicate offers from server cause ICE restarts
+			if j.answerSent {
+				log.Println("Ignoring duplicate offer (answer already sent)")
+				return
+			}
 			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sdpStr})
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
@@ -269,6 +427,7 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 				return
 			}
 			j.pc.SetLocalDescription(ans)
+			j.answerSent = true
 			j.vkSendTransmit(*j.remotePeerID, map[string]interface{}{
 				"sdp": map[string]interface{}{"type": "answer", "sdp": ans.SDP},
 			})

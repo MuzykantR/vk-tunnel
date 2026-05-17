@@ -61,10 +61,17 @@ func (p *P2PHandler) Reset() {
 
 func (p *P2PHandler) OnRegisteredPeer(participantID int64) {
 	old := p.remotePeerID
-	p.remotePeerID = &participantID
-	log.Printf("[p2p] Peer registered: %d (topology=%s)", participantID, p.bridge.topology)
+	log.Printf("[p2p] Peer registered: %d (topology=%s, old=%v)", participantID, p.bridge.topology, old)
 
-	if old != nil && p.pendingOffer == nil {
+	// Skip if same peer already registered — VK sends both participant-joined and registered-peer
+	if old != nil && *old == participantID && p.pendingOffer == nil {
+		log.Printf("[p2p] Same peer %d already registered, skipping duplicate", participantID)
+		return
+	}
+
+	p.remotePeerID = &participantID
+
+	if old != nil && *old != participantID && p.pendingOffer == nil {
 		p.Reset()
 	}
 	p.sendOfferToPeer(participantID)
