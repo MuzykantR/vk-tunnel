@@ -50,3 +50,7 @@ func (a *Adapter) Stop() {
 	}
 	log.Println("Wintun adapter stopped.")
 }
+
+func (a *Adapter) Session() wintun.Session {
+	return a.session
+}

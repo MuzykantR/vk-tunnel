@@ -1,14 +1,18 @@
 package parser
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/vk-vpn/client/crypto"
 )
+
+const MASTER_KEY_HEX = "5c34e8f9b2d1a0c746e5f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9"
 
 type VPNPayload struct {
 	Link     string `json:"link"`
@@ -29,18 +33,48 @@ func ParseAndDecryptURI(uri string) (*VPNPayload, error) {
 	}
 
 	version := parts[0]
-	ivB64 := parts[1]
-	cipherB64 := parts[2]
-
 	if version != "v1" {
 		return nil, fmt.Errorf("unsupported protocol version: %s", version)
 	}
 
-	plaintext, err := crypto.DecryptPayload(ivB64, cipherB64)
+	ivB64 := parts[1]
+	cipherB64 := parts[2]
+
+	// 1. Decode IV and Ciphertext from Base64URL (unpadded)
+	iv, err := base64.RawURLEncoding.DecodeString(ivB64)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode IV: %w", err)
 	}
 
+	ciphertext, err := base64.RawURLEncoding.DecodeString(cipherB64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode ciphertext: %w", err)
+	}
+
+	// 2. Decode MASTER_KEY from hex
+	key, err := hex.DecodeString(MASTER_KEY_HEX)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode master key: %w", err)
+	}
+
+	// 3. Initialize AES-GCM
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// 4. Decrypt (Open)
+	plaintext, err := aesgcm.Open(nil, iv, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt payload: %w", err)
+	}
+
+	// 5. Unmarshal JSON
 	var payload VPNPayload
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return nil, fmt.Errorf("failed to parse decrypted JSON: %w", err)
