@@ -98,10 +98,11 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (string, 
 	}
 	json.Unmarshal(r, &call)
 	okJoinLink := call.Response.OKJoinLink
+	vkJoinLink := call.Response.JoinLink
 	if okJoinLink == "" {
 		return "", "", fmt.Errorf("empty ok_join_link: %s", string(r))
 	}
-	log.Printf("Call created, OK Join Link: %s", okJoinLink)
+	log.Printf("Call created, OK Join Link: %s, VK Join Link: %s", okJoinLink, vkJoinLink)
 
 	// 3. Get settings (Public Key)
 	r, err = s.httpPost("https://api.vk.com/method/calls.getSettings", url.Values{"v": {apiVersion}}, auth)
@@ -173,9 +174,8 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (string, 
 	}
 
 	wsURL := joinResp.Endpoint + "&platform=WEB&appVersion=1.1&version=6&device=browser&capabilities=0&clientType=VK&tgt=join"
-	return wsURL, okJoinLink, nil
+	return wsURL, vkJoinLink, nil
 }
-
 
 // Connect establishes the WebSocket connection to VK's signaling server
 func (s *VKSignaling) Connect(ctx context.Context, wsURL string) error {
