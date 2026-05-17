@@ -12,9 +12,9 @@ import (
 )
 
 type Daemon struct {
-	cookies     []config.CookieInfo
-	mu          sync.RWMutex
-	currentLink string // The raw VK join link
+	cookies      []config.CookieInfo
+	mu           sync.RWMutex
+	currentLink  string // The raw VK join link
 	serverPubKey string // Ed25519 public key (mock for now)
 }
 
@@ -50,7 +50,7 @@ func (d *Daemon) Start(ctx context.Context) {
 		default:
 			log.Println("Initiating new call session...")
 			d.runSession(ctx)
-			
+
 			// If session exits (due to error or Topology SERVER), wait a bit before reconnecting
 			log.Println("Session ended. Reconnecting in 3 seconds...")
 			select {
@@ -72,7 +72,7 @@ func (d *Daemon) runSession(parentCtx context.Context) {
 
 	// 1. Fetch Call Link and Signaling URL
 	// We use a valid chat peer_id (e.g. 2000000001) to create the call
-	peerID := "2000000001" 
+	peerID := "2000000001"
 	wsURL, rawLink, err := vkSig.FetchCallURL(ctx, peerID)
 	if err != nil {
 		log.Printf("Failed to fetch call URL: %v", err)
@@ -82,7 +82,7 @@ func (d *Daemon) runSession(parentCtx context.Context) {
 	// Update the active link so the API can serve it
 	d.setLinkInfo(rawLink)
 	log.Printf("New Call created! Active link: %s", rawLink)
-	
+
 	// TODO: Notify Bot via Webhook if it was a reconnect (Bot can push to clients)
 
 	// 2. Connect to VK WebSocket
@@ -109,7 +109,7 @@ func (d *Daemon) runSession(parentCtx context.Context) {
 				log.Println("Signaling channel closed.")
 				return
 			}
-			
+
 			// Handle events
 			evtType, _ := event["type"].(string)
 			switch evtType {

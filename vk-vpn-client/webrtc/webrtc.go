@@ -71,12 +71,12 @@ func (c *Client) sendVK(command string, data interface{}) {
 }
 
 // Connect establishes real connection to VK SFU WebSocket and handles signaling
-func (c *Client) Connect(captchaSid, captchaKey string) error {
+func (c *Client) Connect() error {
 	log.Println("Setting up WebRTC tracks and DataChannels for VK SFU...")
 
 	// Resolve the HTTP link to a WebSocket URL
 	log.Println("Resolving join link via VK HTTP API...")
-	wsURL, err := ResolveJoinLink(c.payload.Link, captchaSid, captchaKey)
+	wsURL, err := ResolveJoinLink(c.payload.Link)
 	if err != nil {
 		return err // Could be CAPTCHA_REQUIRED error
 	}

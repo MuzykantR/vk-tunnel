@@ -4,16 +4,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 )
 
+type vkCaptchaError struct {
+	captchaSid     string
+	redirectURI    string
+	captchaTs      string
+	captchaAttempt string
+}
+
+func parseVKCaptchaError(errObj map[string]interface{}) *vkCaptchaError {
+	redirectURI, _ := errObj["redirect_uri"].(string)
+	if redirectURI == "" {
+		return nil
+	}
+	captchaSid := ""
+	if sid, ok := errObj["captcha_sid"].(string); ok {
+		captchaSid = sid
+	} else if sidNum, ok := errObj["captcha_sid"].(float64); ok {
+		captchaSid = fmt.Sprintf("%.0f", sidNum)
+	}
+	captchaTs, _ := errObj["captcha_ts"].(string)
+	captchaAttempt, _ := errObj["captcha_attempt"].(string)
+	return &vkCaptchaError{
+		captchaSid:     captchaSid,
+		redirectURI:    redirectURI,
+		captchaTs:      captchaTs,
+		captchaAttempt: captchaAttempt,
+	}
+}
+
 // ResolveJoinLink performs HTTP requests to login.vk.com and api.vk.com
 // to get an anonymous token and resolve the joinLink into a WebSocket URL.
-func ResolveJoinLink(joinLink, captchaSid, captchaKey string) (string, error) {
+// Captcha is handled autonomously via a local proxy + browser.
+func ResolveJoinLink(joinLink string) (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	httpPost := func(targetURL string, form url.Values, extraHeaders map[string]string) (map[string]interface{}, error) {
@@ -89,41 +120,87 @@ func ResolveJoinLink(joinLink, captchaSid, captchaKey string) (string, error) {
 		}
 	}
 
-	// 4. Get call token (may trigger captcha)
+	// 4. Get call token (with interactive Turnstile captcha retry loop)
 	callParams := url.Values{
 		"v":            {apiVersion},
 		"vk_join_link": {joinLink},
 		"name":         {"Joiner"},
 	}
-	if captchaSid != "" && captchaKey != "" {
-		callParams.Set("captcha_sid", captchaSid)
-		callParams.Set("captcha_key", captchaKey)
-	}
 
-	callResp, err := httpPost("https://api.vk.com/method/calls.getAnonymousToken", callParams, auth)
-	if err != nil {
-		return "", fmt.Errorf("getAnonymousToken: %w", err)
-	}
-	if errObj, hasErr := callResp["error"].(map[string]interface{}); hasErr {
-		errCode, _ := errObj["error_code"].(float64)
-		if int(errCode) == 14 {
-			// Captcha required!
-			sid, _ := errObj["captcha_sid"].(string)
-			img, _ := errObj["captcha_img"].(string)
-			return "", fmt.Errorf("CAPTCHA_REQUIRED|%s|%s", sid, img)
+	var callToken string
+	var apiBaseURL string
+
+	for attempt := 0; attempt < 5; attempt++ {
+		callResp, err := httpPost("https://api.vk.com/method/calls.getAnonymousToken", callParams, auth)
+		if err != nil {
+			return "", fmt.Errorf("getAnonymousToken: %w", err)
 		}
-		return "", fmt.Errorf("VK API error: %v", errObj)
+
+		if errObj, hasErr := callResp["error"].(map[string]interface{}); hasErr {
+			errCode, _ := errObj["error_code"].(float64)
+			if int(errCode) == 14 {
+				captchaErr := parseVKCaptchaError(errObj)
+				if captchaErr == nil {
+					return "", fmt.Errorf("captcha error missing fields: %v", errObj)
+				}
+
+				log.Println("Captcha required by VK. Launching browser for interactive verification...")
+
+				proxyPort := StartCaptchaProxy(captchaErr.redirectURI, nil)
+				if proxyPort == 0 {
+					return "", fmt.Errorf("failed to start captcha proxy")
+				}
+
+				// Open the user's default browser
+				captchaURL := fmt.Sprintf("http://127.0.0.1:%d/", proxyPort)
+				log.Printf("Opening captcha in browser: %s", captchaURL)
+				exec.Command("cmd", "/c", "start", captchaURL).Run()
+
+				// Block until the user solves the captcha (up to 5 minutes)
+				successToken := GetCaptchaResult()
+				StopCaptchaProxy()
+
+				if successToken == "" {
+					return "", fmt.Errorf("captcha timed out or was not solved")
+				}
+
+				log.Println("Captcha solved successfully! Retrying API call...")
+
+				captchaAttempt := captchaErr.captchaAttempt
+				if captchaAttempt == "" || captchaAttempt == "0" {
+					captchaAttempt = "1"
+				}
+				callParams = url.Values{
+					"v":               {apiVersion},
+					"vk_join_link":    {joinLink},
+					"name":            {"Joiner"},
+					"captcha_key":     {""},
+					"captcha_sid":     {captchaErr.captchaSid},
+					"is_sound_captcha": {"0"},
+					"success_token":   {successToken},
+					"captcha_ts":      {captchaErr.captchaTs},
+					"captcha_attempt": {captchaAttempt},
+				}
+				continue
+			}
+			return "", fmt.Errorf("VK API error: %v", errObj)
+		}
+
+		respMap, ok := callResp["response"].(map[string]interface{})
+		if !ok {
+			return "", fmt.Errorf("unexpected response: %v", callResp)
+		}
+		callToken, _ = respMap["token"].(string)
+		apiBaseURL, _ = respMap["api_base_url"].(string)
+
+		if okJoinLink == "" {
+			okJoinLink, _ = respMap["ok_join_link"].(string)
+		}
+		break
 	}
 
-	respMap, ok := callResp["response"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("unexpected response: %v", callResp)
-	}
-	callToken, _ := respMap["token"].(string)
-	apiBaseURL, _ := respMap["api_base_url"].(string)
-
-	if okJoinLink == "" {
-		okJoinLink, _ = respMap["ok_join_link"].(string)
+	if callToken == "" {
+		return "", fmt.Errorf("failed to get call token after retries")
 	}
 
 	// 5. OK.ru anonymLogin
