@@ -232,14 +232,15 @@ func (c *Client) handleVKMessage(raw []byte) {
 	}
 	notif, _ := msg["notification"].(string)
 	switch notif {
-	case "registered-peer":
-		if pid, ok := msg["participantId"].(float64); ok {
-			c.peerID = int64(pid)
+	case "registered-peer", "participant-joined", "participant-added":
+		if pid, ok := parseParticipantID(msg["participantId"]); ok {
+			c.peerID = pid
 			log.Printf("Registered peer ID: %d", c.peerID)
 		}
 	case "transmitted-data":
-		if pid, ok := msg["participantId"].(float64); ok && c.peerID == 0 {
-			c.peerID = int64(pid)
+		if pid, ok := parseParticipantID(msg["participantId"]); ok && c.peerID == 0 {
+			c.peerID = pid
+			log.Printf("Peer ID from transmitted-data: %d", c.peerID)
 		}
 		data, _ := msg["data"].(map[string]interface{})
 		if data == nil {
@@ -259,7 +260,9 @@ func (c *Client) handleVKMessage(raw []byte) {
 		if sdpObj, ok := data["sdp"].(map[string]interface{}); ok {
 			sdpType, _ := sdpObj["type"].(string)
 			sdpStr, _ := sdpObj["sdp"].(string)
-			if sdpType == "offer" {
+			log.Printf("Remote SDP: %s (peer=%d)", sdpType, c.peerID)
+			switch sdpType {
+			case "offer":
 				c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sdpStr})
 				c.remoteSet = true
 				for _, ice := range c.pendingICE {
@@ -269,7 +272,7 @@ func (c *Client) handleVKMessage(raw []byte) {
 
 				ans, err := c.pc.CreateAnswer(nil)
 				if err != nil || c.peerID == 0 {
-					log.Printf("CreateAnswer failed: %v", err)
+					log.Printf("CreateAnswer failed: peer=%d err=%v", c.peerID, err)
 					return
 				}
 				c.pc.SetLocalDescription(ans)
@@ -280,9 +283,20 @@ func (c *Client) handleVKMessage(raw []byte) {
 					raw := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":{"sdp":{"sdp":%s,"type":%q},"animojiVersion":2},"participantType":"USER"}`,
 						c.vkSeq, c.peerID, sdpJSON, ans.Type.String())
 					c.wsConn.WriteMessage(websocket.TextMessage, []byte(raw))
-					log.Println("Sent SDP answer to VK SFU")
+					log.Println("Sent SDP answer to creator")
 				}
 				c.mu.Unlock()
+			case "answer":
+				if err := c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdpStr}); err != nil {
+					log.Printf("SetRemoteDescription(answer) failed: %v", err)
+					return
+				}
+				c.remoteSet = true
+				for _, ice := range c.pendingICE {
+					c.pc.AddICECandidate(ice)
+				}
+				c.pendingICE = nil
+				log.Println("Applied SDP answer from creator")
 			}
 		}
 	case "connection":

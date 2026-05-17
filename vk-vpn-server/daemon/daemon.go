@@ -74,20 +74,22 @@ func (d *Daemon) runSession(parentCtx context.Context) {
 	d.setLinkInfo(rawLink)
 	log.Printf("New Call created! Active link: %s", rawLink)
 
+	ice := webrtc.ParseICEFromJoin(joinBody)
+	host := webrtc.NewHost(ice)
+	// Handler must be registered before WS readLoop starts (otherwise early SFU messages are lost).
+	vkSig.SetNotificationHandler(host.HandleNotification)
+
 	if err := vkSig.Connect(ctx, wsURL); err != nil {
 		log.Printf("Failed to connect to signaling: %v", err)
 		return
 	}
+	host.AttachWS(vkSig.WSConn())
 
-	ice := webrtc.ParseICEFromJoin(joinBody)
-	host := webrtc.NewHost(vkSig.WSConn(), ice)
 	if err := host.Start(); err != nil {
 		log.Printf("Failed to start WebRTC host: %v", err)
 		return
 	}
 	defer host.Close()
-
-	vkSig.SetNotificationHandler(host.HandleNotification)
 
 	for {
 		select {

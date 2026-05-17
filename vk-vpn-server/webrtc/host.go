@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -31,10 +32,17 @@ type Host struct {
 	ice       ICEConfig
 	remoteSet bool
 	pending   []pion.ICECandidateInit
+	offerSent bool
 }
 
-func NewHost(ws *websocket.Conn, ice ICEConfig) *Host {
-	return &Host{ws: ws, ice: ice}
+func NewHost(ice ICEConfig) *Host {
+	return &Host{ice: ice}
+}
+
+func (h *Host) AttachWS(ws *websocket.Conn) {
+	h.mu.Lock()
+	h.ws = ws
+	h.mu.Unlock()
 }
 
 func (h *Host) Start() error {
@@ -157,17 +165,115 @@ func (h *Host) sendTransmit(data map[string]interface{}) {
 	h.ws.WriteMessage(websocket.TextMessage, []byte(out))
 }
 
+func parseParticipantID(v interface{}) (int64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int64(x), true
+	case json.Number:
+		n, err := x.Int64()
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseInt(x, 10, 64)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+func (h *Host) onPeerRegistered(pid int64) {
+	if pid == 0 {
+		return
+	}
+	h.peerID = pid
+	log.Printf("Server: remote peer %d — initiating WebRTC offer", pid)
+	go h.sendOfferToPeer()
+}
+
+func (h *Host) sendOfferToPeer() {
+	if h.pc == nil || h.peerID == 0 {
+		return
+	}
+	h.mu.Lock()
+	if h.offerSent {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+
+	offer, err := h.pc.CreateOffer(nil)
+	if err != nil {
+		log.Printf("Server: CreateOffer failed: %v", err)
+		return
+	}
+	if err := h.pc.SetLocalDescription(offer); err != nil {
+		log.Printf("Server: SetLocalDescription failed: %v", err)
+		return
+	}
+
+	sdpJSON, _ := json.Marshal(offer.SDP)
+	h.mu.Lock()
+	if h.ws != nil {
+		h.vkSeq++
+		raw := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":{"sdp":{"sdp":%s,"type":%q},"animojiVersion":2},"participantType":"USER"}`,
+			h.vkSeq, h.peerID, sdpJSON, offer.Type.String())
+		h.ws.WriteMessage(websocket.TextMessage, []byte(raw))
+		h.offerSent = true
+		log.Printf("Server: sent WebRTC offer to peer %d", h.peerID)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Host) handleSDP(sdpType, sdpStr string) {
+	if h.pc == nil {
+		return
+	}
+	switch sdpType {
+	case "offer":
+		h.pc.SetRemoteDescription(pion.SessionDescription{Type: pion.SDPTypeOffer, SDP: sdpStr})
+		h.remoteSet = true
+		for _, ice := range h.pending {
+			h.pc.AddICECandidate(ice)
+		}
+		h.pending = nil
+		ans, err := h.pc.CreateAnswer(nil)
+		if err != nil || h.peerID == 0 {
+			log.Printf("Server: CreateAnswer failed: %v", err)
+			return
+		}
+		h.pc.SetLocalDescription(ans)
+		sdpJSON, _ := json.Marshal(ans.SDP)
+		h.mu.Lock()
+		if h.ws != nil {
+			h.vkSeq++
+			raw := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":{"sdp":{"sdp":%s,"type":%q},"animojiVersion":2},"participantType":"USER"}`,
+				h.vkSeq, h.peerID, sdpJSON, ans.Type.String())
+			h.ws.WriteMessage(websocket.TextMessage, []byte(raw))
+			log.Println("Server: sent SDP answer")
+		}
+		h.mu.Unlock()
+	case "answer":
+		if err := h.pc.SetRemoteDescription(pion.SessionDescription{Type: pion.SDPTypeAnswer, SDP: sdpStr}); err != nil {
+			log.Printf("Server: SetRemoteDescription(answer) failed: %v", err)
+			return
+		}
+		h.remoteSet = true
+		for _, ice := range h.pending {
+			h.pc.AddICECandidate(ice)
+		}
+		h.pending = nil
+		log.Println("Server: applied SDP answer from joiner")
+	}
+}
+
 func (h *Host) HandleNotification(msg map[string]interface{}) {
 	notif, _ := msg["notification"].(string)
 	switch notif {
-	case "registered-peer":
-		if pid, ok := msg["participantId"].(float64); ok {
-			h.peerID = int64(pid)
-			log.Printf("Server: remote peer %d", h.peerID)
+	case "registered-peer", "participant-joined", "participant-added":
+		if pid, ok := parseParticipantID(msg["participantId"]); ok {
+			h.onPeerRegistered(pid)
 		}
 	case "transmitted-data":
-		if pid, ok := msg["participantId"].(float64); ok && h.peerID == 0 {
-			h.peerID = int64(pid)
+		if pid, ok := parseParticipantID(msg["participantId"]); ok && h.peerID == 0 {
+			h.peerID = pid
 		}
 		data, _ := msg["data"].(map[string]interface{})
 		if data == nil || h.pc == nil {
@@ -187,35 +293,17 @@ func (h *Host) HandleNotification(msg map[string]interface{}) {
 		if sdp, ok := data["sdp"].(map[string]interface{}); ok {
 			sdpType, _ := sdp["type"].(string)
 			sdpStr, _ := sdp["sdp"].(string)
-			if sdpType == "offer" {
-				h.pc.SetRemoteDescription(pion.SessionDescription{Type: pion.SDPTypeOffer, SDP: sdpStr})
-				h.remoteSet = true
-				for _, ice := range h.pending {
-					h.pc.AddICECandidate(ice)
-				}
-				h.pending = nil
-				ans, err := h.pc.CreateAnswer(nil)
-				if err != nil || h.peerID == 0 {
-					return
-				}
-				h.pc.SetLocalDescription(ans)
-				sdpJSON, _ := json.Marshal(ans.SDP)
-				h.mu.Lock()
-				if h.ws != nil {
-					h.vkSeq++
-					raw := fmt.Sprintf(`{"command":"transmit-data","sequence":%d,"participantId":%d,"data":{"sdp":{"sdp":%s,"type":%q},"animojiVersion":2},"participantType":"USER"}`,
-						h.vkSeq, h.peerID, sdpJSON, ans.Type.String())
-					h.ws.WriteMessage(websocket.TextMessage, []byte(raw))
-					log.Println("Server: sent SDP answer")
-				}
-				h.mu.Unlock()
-			}
+			h.handleSDP(sdpType, sdpStr)
 		}
 	case "connection":
 		if params, ok := msg["conversationParams"].(map[string]interface{}); ok {
 			if turn, ok := params["turn"].(map[string]interface{}); ok {
 				h.updateTURN(turn)
 			}
+		}
+	default:
+		if notif != "" && notif != "topology-changed" {
+			log.Printf("Server: notification %s", notif)
 		}
 	}
 }
@@ -230,13 +318,14 @@ func (h *Host) updateTURN(turn map[string]interface{}) {
 	}
 	user, _ := turn["username"].(string)
 	cred, _ := turn["credential"].(string)
-	if len(urls) == 0 {
+	if len(urls) == 0 || h.pc == nil {
 		return
 	}
 	urls = append(urls, urls[len(urls)-1]+"?transport=tcp")
 	_ = h.pc.SetConfiguration(pion.Configuration{
 		ICEServers: []pion.ICEServer{{URLs: urls, Username: user, Credential: cred}},
 	})
+	log.Printf("Server: updated TURN %v", urls)
 }
 
 func (h *Host) Close() {
