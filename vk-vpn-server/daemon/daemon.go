@@ -71,16 +71,15 @@ func (d *Daemon) runSession(parentCtx context.Context) {
 	defer vkSig.Close()
 
 	// 1. Fetch Call Link and Signaling URL
-	// For MVP we just generate a random call link UUID
-	callID := "mock-uuid-1234" 
-	wsURL, err := vkSig.FetchCallURL(ctx, callID)
+	// We use a valid chat peer_id (e.g. 2000000001) to create the call
+	peerID := "2000000001" 
+	wsURL, rawLink, err := vkSig.FetchCallURL(ctx, peerID)
 	if err != nil {
 		log.Printf("Failed to fetch call URL: %v", err)
 		return
 	}
 
 	// Update the active link so the API can serve it
-	rawLink := "https://vk.com/call/join/" + callID
 	d.setLinkInfo(rawLink)
 	log.Printf("New Call created! Active link: %s", rawLink)
 	

@@ -71,8 +71,15 @@ func (c *Client) sendVK(command string, data interface{}) {
 }
 
 // Connect establishes real connection to VK SFU WebSocket and handles signaling
-func (c *Client) Connect() error {
+func (c *Client) Connect(captchaSid, captchaKey string) error {
 	log.Println("Setting up WebRTC tracks and DataChannels for VK SFU...")
+
+	// Resolve the HTTP link to a WebSocket URL
+	log.Println("Resolving join link via VK HTTP API...")
+	wsURL, err := ResolveJoinLink(c.payload.Link, captchaSid, captchaKey)
+	if err != nil {
+		return err // Could be CAPTCHA_REQUIRED error
+	}
 
 	// 1. Create fake Audio Opus track
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
@@ -126,7 +133,7 @@ func (c *Client) Connect() error {
 
 	// 5. Connect to VK WebSocket
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	wsConn, _, err := dialer.DialContext(c.ctx, c.payload.Link, nil)
+	wsConn, _, err := dialer.DialContext(c.ctx, wsURL, nil)
 	if err != nil {
 		return err
 	}

@@ -32,12 +32,12 @@ func NewApp() *App {
 }
 
 // Connect is called from the JS frontend when the user clicks "Connect".
-func (a *App) Connect(uri string) error {
+func (a *App) Connect(uri, captchaSid, captchaKey string) error {
 	log.Printf("Connecting to VPN via URI: %s", uri)
 
 	// 1. Invoke the Core Client (from Step 4) to parse the URI and start the SOCKS5 proxy
 	log.Println("Starting VPN Core Client...")
-	if err := clientAPI.StartClient(uri, 1080); err != nil {
+	if err := clientAPI.StartClient(uri, 1080, captchaSid, captchaKey); err != nil {
 		return err
 	}
 

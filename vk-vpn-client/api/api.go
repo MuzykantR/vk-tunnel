@@ -18,7 +18,7 @@ var (
 // StartClient initializes the VPN client, connects to WebRTC, and starts SOCKS5.
 // This function is intended to be exported via CGO/Gomobile.
 // Note: In a real CGO environment, you'd use //export StartClient.
-func StartClient(uri string, socksPort int) error {
+func StartClient(uri string, socksPort int, captchaSid, captchaKey string) error {
 	if activeClient != nil {
 		return fmt.Errorf("client is already running")
 	}
@@ -45,7 +45,7 @@ func StartClient(uri string, socksPort int) error {
 	activeClient = client
 
 	// Connect to VK signaling
-	if err := activeClient.Connect(); err != nil {
+	if err := activeClient.Connect(captchaSid, captchaKey); err != nil {
 		cancel()
 		return fmt.Errorf("failed to connect WebRTC: %w", err)
 	}
