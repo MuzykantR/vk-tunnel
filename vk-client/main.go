@@ -48,13 +48,7 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// 2. Resolve and add bypass routes BEFORE any adapter changes
-	log.Println("Setting up routing bypass for VK SFU nodes...")
-	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, bypassIPs); err != nil {
-		return err
-	}
-
-	// 3. Start tun2socks (creates its own Wintun adapter)
+	// 2. Start tun2socks (creates its own Wintun adapter)
 	log.Println("Starting tun2socks engine...")
 	tunEngine, err := tun2socks.MustStart("WLVPN", "127.0.0.1:1080")
 	if err != nil {
@@ -62,7 +56,7 @@ func (a *App) Connect(uri string) error {
 	}
 	a.tunEngine = tunEngine
 
-	// 4. Wait for adapter, configure IP (no DNS on TUN — our SOCKS5 lacks UDP relay)
+	// 3. Wait for adapter, configure IP (no DNS on TUN — our SOCKS5 lacks UDP relay)
 	time.Sleep(1 * time.Second)
 	tunName := wintun.FindTunAdapter()
 	if tunName == "" {
@@ -75,6 +69,13 @@ func (a *App) Connect(uri string) error {
 	// Set MTU to 1400 to prevent UDP fragmentation issues over Docker/VPN networks
 	if err := wintun.SetMTU(tunName, 1400); err != nil {
 		log.Printf("Warning: failed to set MTU: %v", err)
+	}
+
+	// 4. Resolve and add bypass routes AFTER the WLVPN adapter is fully configured and settled.
+	// This prevents Windows from flushing or invalidating dynamic bypass routes during adapter creation.
+	log.Println("Setting up routing bypass for VK SFU nodes...")
+	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, bypassIPs); err != nil {
+		return err
 	}
 
 	// 5. Bypass DNS servers so DNS resolves instantly (not through broken UDP tunnel)

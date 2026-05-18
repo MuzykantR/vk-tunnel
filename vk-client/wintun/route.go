@@ -196,6 +196,9 @@ func AddBypassSubnet(cidr, gateway string) {
 
 // addHostRoute installs a /32 bypass route with metric 1 (highest priority).
 func addHostRoute(ip, gateway string) error {
+	if ip == gateway {
+		return nil
+	}
 	cmd := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway, "METRIC", "1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
