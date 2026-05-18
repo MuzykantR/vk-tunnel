@@ -1,0 +1,16 @@
+[Unit]
+Description=VK VPN Telegram Bot
+After=network.target vk-vpn-daemon.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vk-vpn/vk-vpn-bot
+ExecStart=/opt/vk-vpn/vk-vpn-bot/venv/bin/python main.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
