@@ -60,7 +60,7 @@ func FindTunAdapter() string {
 func SetupRoutingLoopBypass(defaultGateway string, extraBypassIPs []string) error {
 	vkDomains := []string{
 		"vk.com", "vk.ru", "okcdn.ru", "mycdn.me",
-		"stun.l.google.com", "stun.vk.com",
+		"stun.l.google.com", "stun.vk.com", "videowebrtc.okcdn.ru",
 	}
 
 	for _, domain := range vkDomains {
@@ -77,12 +77,27 @@ func SetupRoutingLoopBypass(defaultGateway string, extraBypassIPs []string) erro
 		}
 	}
 
-	for _, ip := range extraBypassIPs {
-		if net.ParseIP(ip) == nil || net.ParseIP(ip).To4() == nil {
-			continue // skip IPv6
+	for _, item := range extraBypassIPs {
+		if net.ParseIP(item) != nil {
+			if net.ParseIP(item).To4() != nil {
+				log.Printf("Adding TURN/STUN bypass route for %s via %s", item, defaultGateway)
+				addHostRoute(item, defaultGateway)
+			}
+			continue
 		}
-		log.Printf("Adding TURN/STUN bypass route for %s via %s", ip, defaultGateway)
-		addHostRoute(ip, defaultGateway)
+		// It's a hostname (e.g. videowebrtc.okcdn.ru)! Resolve it to IPv4!
+		log.Printf("Resolving dynamic bypass hostname: %s", item)
+		ips, err := net.LookupIP(item)
+		if err != nil {
+			log.Printf("Warning: failed to resolve dynamic bypass hostname %s: %v", item, err)
+			continue
+		}
+		for _, ip := range ips {
+			if ip.To4() != nil {
+				log.Printf("Adding direct route for bypassed hostname %s (%s) via %s", item, ip.String(), defaultGateway)
+				addHostRoute(ip.String(), defaultGateway)
+			}
+		}
 	}
 
 	// Add VK IP subnets bypass routes

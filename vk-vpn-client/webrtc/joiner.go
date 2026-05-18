@@ -72,14 +72,11 @@ func (j *Joiner) GetBypassIPs() []string {
 	seen := make(map[string]bool)
 	var ips []string
 	add := func(host string) {
-		if seen[host] {
+		if host == "" || seen[host] {
 			return
 		}
 		seen[host] = true
-		if net.ParseIP(host) != nil {
-			ips = append(ips, host)
-			return
-		}
+		ips = append(ips, host)
 		resolved, err := net.LookupIP(host)
 		if err != nil {
 			return

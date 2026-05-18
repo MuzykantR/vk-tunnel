@@ -1,4 +1,4 @@
-.PHONY: build-server setup-bot systemd-install restart deploy logs-daemon logs-bot
+.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy logs-daemon logs-bot
 
 # Путь к проекту на сервере
 DIR = /opt/vk-vpn
@@ -31,6 +31,16 @@ restart:
 	@echo "Restarting services..."
 	sudo systemctl restart vk-vpn-daemon vk-vpn-bot
 	@echo "Services restarted."
+
+restart-server:
+	@echo "Restarting VK VPN Daemon..."
+	sudo systemctl restart vk-vpn-daemon
+	@echo "Daemon restarted."
+
+restart-bot:
+	@echo "Restarting Telegram Bot..."
+	sudo systemctl restart vk-vpn-bot
+	@echo "Bot restarted."
 
 deploy: build-server setup-bot restart
 	@echo "Deploy successful."
