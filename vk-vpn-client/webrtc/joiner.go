@@ -140,9 +140,13 @@ func extractTurnHost(turnURL string) string {
 }
 
 func (j *Joiner) Run() error {
-	if err := j.joinCall(); err != nil {
-		return err
-	}
+	j.joinResp.Endpoint = j.auth.Endpoint
+	j.joinResp.TurnURLs = j.auth.TurnURLs
+	j.joinResp.TurnUser = j.auth.TurnUser
+	j.joinResp.TurnCred = j.auth.TurnCred
+	j.joinResp.StunURLs = j.auth.StunURLs
+	log.Printf("Joiner: using pre-resolved session params, turn=%v", j.joinResp.TurnURLs)
+
 	j.connectSFU()
 	return nil
 }

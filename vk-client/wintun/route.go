@@ -43,7 +43,7 @@ func SetAdapterDNS(adapterName string, servers []string) {
 // FindTunAdapter finds the tun2socks adapter name.
 func FindTunAdapter() string {
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		`(Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*tun2socks*' } | Select-Object -First 1).Name`)
+		`if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) { Invoke-Expression '(Get-NetAdapter | Where-Object { $_.InterfaceDescription -like ''*tun2socks*'' } | Select-Object -First 1).Name' }`)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -266,13 +266,18 @@ func CleanupAllStaleState(defaultGateway string) {
 
 	// 5. Clean up any stale WLVPN adapters using powershell, falling back to netsh
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-NetAdapter | Where-Object { $_.Name -like '*WLVPN*' } | Remove-NetAdapter -Confirm:$false")
+		`if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { Invoke-Expression 'Get-NetAdapter | Where-Object { $_.Name -like ''*WLVPN*'' } | Remove-NetAdapter -Confirm:$false' } else { Write-Error "NetAdapter module not available" }`)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		log.Println("Cleaned up stale WLVPN adapters.")
 	} else {
 		exec.Command("netsh", "interface", "delete", "interface", "name=WLVPN").Run()
-		log.Printf("Stale adapter cleanup output (PS failed, fallback to netsh executed): %s", strings.TrimSpace(string(out)))
+		outStr := strings.TrimSpace(string(out))
+		if strings.Contains(outStr, "NetAdapter module not available") {
+			log.Println("NetAdapter module not available, using netsh fallback for adapter cleanup.")
+		} else {
+			log.Printf("Stale adapter cleanup output (PS failed, fallback to netsh executed): %s", outStr)
+		}
 	}
 
 	log.Println("Network cleanup completed successfully.")

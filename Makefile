@@ -1,4 +1,4 @@
-.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy logs-daemon logs-bot
+.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy deploy-server deploy-daemon deploy-bot logs-daemon logs-bot
 
 # Путь к проекту на сервере
 DIR = /opt/vk-vpn
@@ -44,6 +44,14 @@ restart-bot:
 
 deploy: build-server setup-bot restart
 	@echo "Deploy successful."
+
+deploy-server: build-server restart-server
+	@echo "Server deploy successful."
+
+deploy-daemon: deploy-server
+
+deploy-bot: setup-bot restart-bot
+	@echo "Bot deploy successful."
 
 logs-daemon:
 	sudo journalctl -u vk-vpn-daemon -f

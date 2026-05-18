@@ -54,6 +54,7 @@ type AuthParams struct {
 	TurnURLs        []string `json:"-"`
 	TurnUser        string   `json:"-"`
 	TurnCred        string   `json:"-"`
+	Endpoint        string   `json:"endpoint"`
 }
 
 // ResolveJoinLink performs HTTP requests to login.vk.com and api.vk.com
@@ -277,6 +278,7 @@ func ResolveJoinLink(joinLink string) (*AuthParams, error) {
 		AnonymToken:     callToken,
 		AppVersion:      appVersion,
 		ProtocolVersion: "6",
+		Endpoint:        endpoint,
 	}
 	if turn, ok := r["turn_server"].(map[string]interface{}); ok {
 		result.TurnUser, _ = turn["username"].(string)
