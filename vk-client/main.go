@@ -4,13 +4,14 @@ import (
 	"context"
 	"embed"
 	"log"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 
-	"vk-client/wintun"
 	"vk-client/tun2socks"
+	"vk-client/wintun"
 	clientAPI "github.com/vk-vpn/client/api"
 )
 
@@ -19,9 +20,9 @@ var assets embed.FS
 
 // App struct holds the application state.
 type App struct {
-	wintunAdapter *wintun.Adapter
-	defaultGW     string // Discovered default gateway of the PC
-	wintunIP      string
+	tunEngine *tun2socks.Engine
+	defaultGW string
+	wintunIP  string
 }
 
 func NewApp() *App {
@@ -35,53 +36,45 @@ func NewApp() *App {
 func (a *App) Connect(uri string) error {
 	log.Printf("Connecting to VPN via URI: %s", uri)
 
-	// 1. Invoke the Core Client (from Step 4) to parse the URI and start the SOCKS5 proxy
+	// 1. Start WebRTC client — establishes ICE + DC + SOCKS5 listener
 	log.Println("Starting VPN Core Client...")
-	if err := clientAPI.StartClient(uri, 1080); err != nil {
-		return err
-	}
-
-	// 2. Initialize Wintun Adapter
-	log.Println("Initializing Wintun adapter...")
-	adapter, err := wintun.CreateAdapter("WLVPN")
+	bypassIPs, err := clientAPI.StartClient(uri, 1080)
 	if err != nil {
 		return err
 	}
-	a.wintunAdapter = adapter
 
-	if err := a.wintunAdapter.Start(); err != nil {
+	// 2. Resolve and add bypass routes BEFORE any adapter changes
+	log.Println("Setting up routing bypass for VK SFU nodes...")
+	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, bypassIPs); err != nil {
 		return err
 	}
 
-	// 3. Configure Wintun Interface IP
-	log.Println("Configuring Wintun Interface IP...")
-	// if err := wintun.ConfigureInterface("WLVPN", a.wintunIP, "255.255.255.0"); err != nil {
-	// 	return err
-	// }
-	// We comment out ConfigureInterface for now if it's missing or mock, assuming it exists:
-	// But let's leave it as is if it exists in the user's wintun package.
-	// Actually, the user did not say to change this part. I will leave it exactly as it was.
-	if err := wintun.ConfigureInterface("WLVPN", a.wintunIP, "255.255.255.0"); err != nil {
-		return err
-	}
-
-	// 4. tun2socks: steer Wintun packets into local SOCKS5 (relay starts after WebRTC DC opens)
+	// 3. Start tun2socks (creates its own Wintun adapter)
 	log.Println("Starting tun2socks engine...")
 	tunEngine, err := tun2socks.MustStart("WLVPN", "127.0.0.1:1080")
 	if err != nil {
 		return err
 	}
-	_ = tunEngine
+	a.tunEngine = tunEngine
 
-	// 5. Setup Routing Bypass (CRITICAL loop prevention)
-	log.Println("Setting up routing bypass for VK SFU nodes...")
-	if err := wintun.SetupRoutingLoopBypass(a.defaultGW); err != nil {
+	// 4. Wait for adapter, configure IP (no DNS on TUN — our SOCKS5 lacks UDP relay)
+	time.Sleep(1 * time.Second)
+	tunName := wintun.FindTunAdapter()
+	if tunName == "" {
+		tunName = "WLVPN"
+	}
+	log.Printf("Using TUN adapter: %s", tunName)
+	if err := wintun.ConfigureInterface(tunName, a.wintunIP, "255.255.255.0"); err != nil {
 		return err
 	}
 
-	// 6. Redirect 0.0.0.0/0 to Wintun
-	log.Println("Redirecting default traffic to Wintun...")
-	if err := wintun.RedirectDefaultTraffic(a.wintunIP); err != nil {
+	// 5. Bypass DNS servers so DNS resolves instantly (not through broken UDP tunnel)
+	for _, dns := range []string{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"} {
+		wintun.AddBypassRoute(dns, a.defaultGW)
+	}
+
+	// 6. Redirect default traffic through TUN
+	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
 		return err
 	}
 
@@ -92,24 +85,16 @@ func (a *App) Connect(uri string) error {
 // Disconnect restores routing and closes adapters.
 func (a *App) Disconnect() {
 	log.Println("Disconnecting VPN...")
-	
-	wintun.CleanupRouting(a.wintunIP)
-	
-	if a.wintunAdapter != nil {
-		a.wintunAdapter.Stop()
+	wintun.CleanupRouting("WLVPN")
+	if a.tunEngine != nil {
+		a.tunEngine.Stop()
 	}
-
-	// Note: clientAPI doesn't have a StopClient in the prompt, but normally you'd call it here.
-	// clientAPI.StopClient()
-
 	log.Println("VPN Disconnected.")
 }
 
 func main() {
-	// Создаем экземпляр нашего приложения
 	app := NewApp()
 
-	// Запускаем графическое окно Wails
 	err := wails.Run(&options.App{
 		Title:  "Partizan VPN",
 		Width:  800,
@@ -122,7 +107,7 @@ func main() {
 			log.Println("App Started")
 		},
 		Bind: []interface{}{
-			app, // Биндим наши методы Connect и Disconnect к интерфейсу
+			app,
 		},
 	})
 

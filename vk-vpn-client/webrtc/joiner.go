@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -44,8 +43,10 @@ type Joiner struct {
 	remoteSet    bool
 	pendingICE   []webrtc.ICECandidateInit
 	answerSent   bool
+	remoteIPs    map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
 	mu           sync.Mutex
 	socksConns   map[uint32]net.Conn
+	connectCh    map[uint32]chan error // signals ConnectOK/ConnectErr per conn
 	connIDSeq    uint32
 	connIDMu     sync.Mutex
 }
@@ -57,10 +58,88 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 		readyCh:    make(chan struct{}),
 		ctx:        ctx,
 		socksConns: make(map[uint32]net.Conn),
+		connectCh:  make(map[uint32]chan error),
+		remoteIPs:  make(map[string]bool),
 	}
 }
 
 func (j *Joiner) Ready() <-chan struct{} { return j.readyCh }
+
+// GetBypassIPs returns all IPs that the joiner actively connects to.
+// These MUST be routed directly (not through the VPN tunnel) to prevent routing loops.
+func (j *Joiner) GetBypassIPs() []string {
+	seen := make(map[string]bool)
+	var ips []string
+	add := func(host string) {
+		if seen[host] {
+			return
+		}
+		seen[host] = true
+		if net.ParseIP(host) != nil {
+			ips = append(ips, host)
+			return
+		}
+		resolved, err := net.LookupIP(host)
+		if err != nil {
+			return
+		}
+		for _, ip := range resolved {
+			if ip.To4() != nil && !seen[ip.String()] {
+				seen[ip.String()] = true
+				ips = append(ips, ip.String())
+			}
+		}
+	}
+
+	// 1. WebSocket signaling endpoint (CRITICAL — missing before this fix)
+	if j.joinResp.Endpoint != "" {
+		if parsed, err := url.Parse(j.joinResp.Endpoint); err == nil {
+			log.Printf("[bypass] WS endpoint host: %s", parsed.Hostname())
+			add(parsed.Hostname())
+		}
+	}
+
+	// 2. TURN servers from the actual session
+	for _, u := range j.joinResp.TurnURLs {
+		host := extractTurnHost(u)
+		add(host)
+	}
+
+	// 3. STUN servers
+	for _, u := range j.joinResp.StunURLs {
+		host := extractTurnHost(u)
+		add(host)
+	}
+
+	// 4. Remote ICE candidate IPs (VPS public IP for P2P/DIRECT connections)
+	for ip := range j.remoteIPs {
+		if !seen[ip] {
+			seen[ip] = true
+			ips = append(ips, ip)
+			log.Printf("[bypass] adding remote ICE IP: %s", ip)
+		}
+	}
+
+	return ips
+}
+
+func extractTurnHost(turnURL string) string {
+	s := turnURL
+	for _, prefix := range []string{"turn:", "turns:", "stun:", "stuns:"} {
+		if len(s) > len(prefix) && s[:len(prefix)] == prefix {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	if qIdx := strings.Index(s, "?"); qIdx >= 0 {
+		s = s[:qIdx]
+	}
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		return s
+	}
+	return host
+}
 
 func (j *Joiner) Run() error {
 	if err := j.joinCall(); err != nil {
@@ -189,8 +268,46 @@ func (j *Joiner) initPC() {
 		ice = append(ice, webrtc.ICEServer{URLs: urls, Username: j.joinResp.TurnUser, Credential: j.joinResp.TurnCred})
 	}
 
-	// Use default NewPeerConnection — it registers all standard codecs (VP8, Opus)
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
+	// Bind ICE to physical adapter ONLY.
+	// Without this, ICE uses 0.0.0.0 and routing table changes cause source IP shift → ICE dies.
+	se := webrtc.SettingEngine{}
+	se.SetNetworkTypes([]webrtc.NetworkType{
+		webrtc.NetworkTypeUDP4,
+		webrtc.NetworkTypeTCP4,
+	})
+
+	// Find the physical adapter's IP (non-loopback, non-TUN, IPv4)
+	physicalIP := getPhysicalIP()
+	if physicalIP != "" {
+		log.Printf("[ice] Binding ICE to physical adapter IP: %s", physicalIP)
+		se.SetNAT1To1IPs([]string{physicalIP}, webrtc.ICECandidateTypeHost)
+		se.SetIPFilter(func(ip net.IP) bool {
+			// Only allow the physical adapter's IP for ICE
+			allowed := ip.String() == physicalIP
+			if !allowed {
+				log.Printf("[ice] filtering out IP: %s", ip.String())
+			}
+			return allowed
+		})
+	}
+
+	se.SetInterfaceFilter(func(iface string) bool {
+		excluded := []string{"WLVPN", "tun", "Wintun", "TAP", "Loopback", "Hyper-V", "vEthernet"}
+		ifaceLower := strings.ToLower(iface)
+		for _, ex := range excluded {
+			if strings.Contains(ifaceLower, strings.ToLower(ex)) {
+				log.Printf("[ice] excluding interface: %s", iface)
+				return false
+			}
+		}
+		log.Printf("[ice] using interface: %s", iface)
+		return true
+	})
+
+	me := &webrtc.MediaEngine{}
+	me.RegisterDefaultCodecs()
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 	if err != nil {
 		log.Printf("Joiner: PC failed: %v", err)
 		return
@@ -253,6 +370,9 @@ func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
+	if mt == msgData {
+		log.Printf("[dc-out] conn %d: sending %d bytes to server", connID, len(payload))
+	}
 	j.dc.Send(buf)
 }
 
@@ -267,14 +387,35 @@ func (j *Joiner) handleDCMessage(data []byte) {
 	switch mt {
 	case msgConnectOK:
 		log.Printf("[socks] conn %d: connect OK", connID)
+		j.mu.Lock()
+		ch := j.connectCh[connID]
+		j.mu.Unlock()
+		if ch != nil {
+			ch <- nil
+		}
 	case msgConnectErr:
-		log.Printf("[socks] conn %d: connect error: %s", connID, string(payload))
+		errMsg := string(payload)
+		log.Printf("[socks] conn %d: connect error: %s", connID, errMsg)
+		j.mu.Lock()
+		ch := j.connectCh[connID]
+		j.mu.Unlock()
+		if ch != nil {
+			ch <- fmt.Errorf("%s", errMsg)
+		}
 	case msgData:
+		log.Printf("[dc-in] conn %d: received %d bytes from server", connID, len(payload))
 		j.mu.Lock()
 		conn := j.socksConns[connID]
 		j.mu.Unlock()
 		if conn != nil {
-			conn.Write(payload)
+			n, err := conn.Write(payload)
+			if err != nil {
+				log.Printf("[dc-in] conn %d: write error: %v", connID, err)
+			} else {
+				log.Printf("[dc-in] conn %d: wrote %d bytes to local", connID, n)
+			}
+		} else {
+			log.Printf("[dc-in] conn %d: no local conn found!", connID)
 		}
 	case msgClose:
 		j.mu.Lock()
@@ -305,25 +446,37 @@ func (j *Joiner) listenSOCKS() {
 }
 
 func (j *Joiner) handleSOCKS(conn net.Conn) {
+	defer conn.Close()
+
 	// SOCKS5 handshake
-	buf := make([]byte, 256)
+	buf := make([]byte, 512)
 	n, err := conn.Read(buf)
 	if err != nil || n < 2 || buf[0] != 0x05 {
-		conn.Close()
 		return
 	}
 	conn.Write([]byte{0x05, 0x00}) // no auth
 
 	n, err = conn.Read(buf)
-	if err != nil || n < 7 || buf[1] != 0x01 {
-		conn.Close()
+	if err != nil || n < 7 {
 		return
 	}
+
+	cmd := buf[1]
+	if cmd == 0x03 {
+		// UDP ASSOCIATE — not supported, reply with command not supported
+		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	if cmd != 0x01 {
+		// Not TCP CONNECT
+		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
 	var target string
 	switch buf[3] {
 	case 0x01: // IPv4
 		if n < 10 {
-			conn.Close()
 			return
 		}
 		ip := net.IP(buf[4:8])
@@ -332,30 +485,64 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 	case 0x03: // Domain
 		domainLen := int(buf[4])
 		if n < 5+domainLen+2 {
-			conn.Close()
 			return
 		}
 		domain := string(buf[5 : 5+domainLen])
 		port := binary.BigEndian.Uint16(buf[5+domainLen : 5+domainLen+2])
 		target = fmt.Sprintf("%s:%d", domain, port)
+	case 0x04: // IPv6
+		if n < 22 {
+			return
+		}
+		ip := net.IP(buf[4:20])
+		port := binary.BigEndian.Uint16(buf[20:22])
+		target = fmt.Sprintf("[%s]:%d", ip.String(), port)
 	default:
-		conn.Close()
 		return
 	}
 
-	// Send CONNECT to creator via DC
+	log.Printf("[socks] new TCP CONNECT -> %s", target)
+
+	// Send CONNECT to creator via DC and WAIT for ConnectOK
 	j.connIDMu.Lock()
 	j.connIDSeq++
 	connID := j.connIDSeq
 	j.connIDMu.Unlock()
 
+	waitCh := make(chan error, 1)
 	j.mu.Lock()
 	j.socksConns[connID] = conn
+	j.connectCh[connID] = waitCh
 	j.mu.Unlock()
 
 	j.sendDCFrame(connID, msgConnect, []byte(target))
 
-	// Reply success to SOCKS5 client immediately
+	// Wait for server to dial the target (ConnectOK or ConnectErr)
+	select {
+	case err := <-waitCh:
+		j.mu.Lock()
+		delete(j.connectCh, connID)
+		j.mu.Unlock()
+		if err != nil {
+			log.Printf("[socks] conn %d: server connect failed: %v", connID, err)
+			conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // connection refused
+			j.mu.Lock()
+			delete(j.socksConns, connID)
+			j.mu.Unlock()
+			return
+		}
+	case <-time.After(30 * time.Second):
+		log.Printf("[socks] conn %d: connect timeout", connID)
+		conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // host unreachable
+		j.mu.Lock()
+		delete(j.socksConns, connID)
+		delete(j.connectCh, connID)
+		j.mu.Unlock()
+		return
+	}
+
+	// NOW reply success — server has confirmed the connection
+	log.Printf("[socks] conn %d: sending SOCKS5 success", connID)
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 
 	// Read from local conn -> send to DC
@@ -366,9 +553,6 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 			j.sendDCFrame(connID, msgData, rbuf[:n])
 		}
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("[socks] conn %d read error: %v", connID, err)
-			}
 			break
 		}
 	}
@@ -391,6 +575,17 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 		b, _ := json.Marshal(cand)
 		var ice webrtc.ICECandidateInit
 		if json.Unmarshal(b, &ice) == nil {
+			// Extract IP from candidate for bypass routing
+			if ice.Candidate != "" {
+				parts := strings.Fields(ice.Candidate)
+				if len(parts) >= 5 {
+					candIP := parts[4]
+					if net.ParseIP(candIP) != nil && !j.remoteIPs[candIP] {
+						j.remoteIPs[candIP] = true
+						log.Printf("[bypass] remote ICE candidate IP: %s", candIP)
+					}
+				}
+			}
 			if j.remoteSet {
 				j.pc.AddICECandidate(ice)
 			} else {
@@ -542,4 +737,17 @@ func (j *Joiner) Close() {
 		j.ws.Close()
 	}
 	StopCaptchaProxy()
+}
+
+// getPhysicalIP discovers the IP of the default physical adapter by doing a
+// UDP "connect" to an external IP (no actual data is sent).
+func getPhysicalIP() string {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		log.Printf("[ice] getPhysicalIP failed: %v", err)
+		return ""
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }
