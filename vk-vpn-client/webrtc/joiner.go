@@ -627,7 +627,7 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 		sdpStr, _ := sdp["sdp"].(string)
 		log.Printf("Remote SDP: %s (answerSent=%v)", sdpType, j.answerSent)
 		if sdpType == "answer" {
-			filteredSDP := filterSDPCandidates(sdpStr)
+			filteredSDP := j.filterAndExtractSDPCandidates(sdpStr)
 			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: filteredSDP})
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
@@ -640,7 +640,7 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 				log.Println("Ignoring duplicate offer (answer already sent)")
 				return
 			}
-			filteredSDP := filterSDPCandidates(sdpStr)
+			filteredSDP := j.filterAndExtractSDPCandidates(sdpStr)
 			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: filteredSDP})
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
@@ -806,9 +806,10 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// filterSDPCandidates parses an SDP string and strips out candidate lines (a=candidate:)
-// that belong to IPv6 or private IPv4 subnets, preventing ICE from trying unreachable paths.
-func filterSDPCandidates(sdp string) string {
+// filterAndExtractSDPCandidates parses an SDP string, strips out candidate lines (a=candidate:)
+// that belong to IPv6 or private IPv4 subnets, and extracts valid remote public IPv4 candidates
+// to the remoteIPs bypass list so they bypass the VPN virtual gateway.
+func (j *Joiner) filterAndExtractSDPCandidates(sdp string) string {
 	lines := strings.Split(sdp, "\n")
 	var out []string
 	for _, line := range lines {
@@ -822,6 +823,11 @@ func filterSDPCandidates(sdp string) string {
 					if ip.To4() == nil || isPrivateIP(ip) {
 						log.Printf("[sdp-filter] Stripping remote inline candidate: %s", ipStr)
 						continue // skip this line
+					}
+					// Add valid remote public IPv4 candidate to remoteIPs bypass list
+					if !j.remoteIPs[ipStr] {
+						j.remoteIPs[ipStr] = true
+						log.Printf("[bypass] Extracted SDP remote ICE candidate IP: %s", ipStr)
 					}
 				}
 			}

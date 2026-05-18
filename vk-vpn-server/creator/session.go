@@ -57,7 +57,7 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		log.Printf("[creator] Connection: %s", st.String())
-		if st == webrtc.PeerConnectionStateDisconnected || st == webrtc.PeerConnectionStateFailed {
+		if st == webrtc.PeerConnectionStateFailed {
 			if s.OnCloseReq != nil {
 				s.OnCloseReq()
 			}
