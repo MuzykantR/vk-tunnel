@@ -18,6 +18,14 @@ func ConfigureInterface(adapterName string, ip string, mask string) error {
 	return err
 }
 
+// SetMTU configures the MTU of the TUN adapter.
+func SetMTU(adapterName string, mtu int) error {
+	log.Printf("Setting MTU of %s to %d...", adapterName, mtu)
+	_, err := runNetsh("interface", "ipv4", "set", "subinterface",
+		adapterName, "mtu="+strconv.Itoa(mtu), "store=active")
+	return err
+}
+
 // SetAdapterDNS pins DNS resolvers on the TUN adapter (same as whitelist-bypass).
 func SetAdapterDNS(adapterName string, servers []string) {
 	if len(servers) == 0 {
@@ -77,6 +85,23 @@ func SetupRoutingLoopBypass(defaultGateway string, extraBypassIPs []string) erro
 		addHostRoute(ip, defaultGateway)
 	}
 
+	// Add VK IP subnets bypass routes
+	vkSubnets := []string{
+		"87.240.128.0/18",
+		"93.186.224.0/20",
+		"95.142.192.0/18",
+		"185.32.248.0/22",
+		"185.180.200.0/22",
+		"217.20.144.0/20",
+		"217.20.154.0/23",
+		"95.213.0.0/17",
+		"79.137.128.0/18",
+	}
+	for _, subnet := range vkSubnets {
+		log.Printf("Adding direct route for VK subnet %s via %s", subnet, defaultGateway)
+		AddBypassSubnet(subnet, defaultGateway)
+	}
+
 	log.Printf("Adding DNS bypass route for gateway %s", defaultGateway)
 	addHostRoute(defaultGateway, defaultGateway)
 
@@ -127,6 +152,33 @@ func AddBypassRoute(ip, gateway string) {
 	}
 }
 
+// AddBypassSubnet installs a bypass route for a subnet CIDR (e.g. "87.240.128.0/18") with metric 1.
+func AddBypassSubnet(cidr, gateway string) {
+	parts := strings.Split(cidr, "/")
+	if len(parts) != 2 {
+		return
+	}
+	ip := parts[0]
+	ones, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return
+	}
+	mask := net.CIDRMask(ones, 32)
+	maskIP := net.IP(mask)
+	maskStr := maskIP.String()
+
+	cmd := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway, "METRIC", "1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// retry without METRIC
+		cmd2 := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway)
+		out, err = cmd2.CombinedOutput()
+		if err != nil {
+			log.Printf("route ADD subnet %s failed: %s", cidr, strings.TrimSpace(string(out)))
+		}
+	}
+}
+
 // addHostRoute installs a /32 bypass route with metric 1 (highest priority).
 func addHostRoute(ip, gateway string) error {
 	cmd := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway, "METRIC", "1")
@@ -150,4 +202,60 @@ func runNetsh(args ...string) ([]byte, error) {
 		log.Printf("netsh %s failed: %s (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, err
+}
+
+// CleanupAllStaleState performs a deep network cleanup to mimic the "reboot effect".
+// It flushes old WLVPN routing configurations, bypass subnets, and removes stale virtual adapters.
+func CleanupAllStaleState(defaultGateway string) {
+	log.Println("Performing deep network cleanup (the 'reboot effect')...")
+
+	// 1. Delete split routes (ignore errors if not present)
+	exec.Command("route", "DELETE", "0.0.0.0", "MASK", "128.0.0.0").Run()
+	exec.Command("route", "DELETE", "128.0.0.0", "MASK", "128.0.0.0").Run()
+
+	// 2. Delete all possible VK / STUN / TURN bypass subnets
+	vkSubnets := []string{
+		"87.240.128.0/18",
+		"93.186.224.0/20",
+		"95.142.192.0/18",
+		"185.32.248.0/22",
+		"185.180.200.0/22",
+		"217.20.144.0/20",
+		"217.20.154.0/23",
+		"95.213.0.0/17",
+		"79.137.128.0/18",
+	}
+	for _, subnet := range vkSubnets {
+		parts := strings.Split(subnet, "/")
+		if len(parts) == 2 {
+			ip := parts[0]
+			ones, _ := strconv.Atoi(parts[1])
+			mask := net.CIDRMask(ones, 32)
+			maskIP := net.IP(mask)
+			exec.Command("route", "DELETE", ip, "MASK", maskIP.String()).Run()
+		}
+	}
+
+	// 3. Delete DNS bypasses
+	for _, dns := range []string{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"} {
+		exec.Command("route", "DELETE", dns, "MASK", "255.255.255.255").Run()
+	}
+
+	// 4. Delete bypassed default gateway route
+	if defaultGateway != "" {
+		exec.Command("route", "DELETE", defaultGateway, "MASK", "255.255.255.255").Run()
+	}
+
+	// 5. Clean up any stale WLVPN adapters using powershell, falling back to netsh
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		"Get-NetAdapter | Where-Object { $_.Name -like '*WLVPN*' } | Remove-NetAdapter -Confirm:$false")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		log.Println("Cleaned up stale WLVPN adapters.")
+	} else {
+		exec.Command("netsh", "interface", "delete", "interface", "name=WLVPN").Run()
+		log.Printf("Stale adapter cleanup output (PS failed, fallback to netsh executed): %s", strings.TrimSpace(string(out)))
+	}
+
+	log.Println("Network cleanup completed successfully.")
 }

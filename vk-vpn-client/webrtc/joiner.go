@@ -49,6 +49,7 @@ type Joiner struct {
 	connectCh    map[uint32]chan error // signals ConnectOK/ConnectErr per conn
 	connIDSeq    uint32
 	connIDMu     sync.Mutex
+	udpListener  *net.UDPConn
 }
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
@@ -281,6 +282,22 @@ func (j *Joiner) initPC() {
 	if physicalIP != "" {
 		log.Printf("[ice] Binding ICE to physical adapter IP: %s", physicalIP)
 		se.SetNAT1To1IPs([]string{physicalIP}, webrtc.ICECandidateTypeHost)
+
+		// Create a UDP listener bound directly to the physical adapter IP to lock routing
+		addr, err := net.ResolveUDPAddr("udp4", physicalIP+":0")
+		if err == nil {
+			udpListener, err := net.ListenUDP("udp4", addr)
+			if err == nil {
+				log.Printf("[ice] Shared UDP mux bound successfully to %s", udpListener.LocalAddr().String())
+				j.udpListener = udpListener
+				se.SetICEUDPMux(webrtc.NewICEUDPMux(nil, udpListener))
+			} else {
+				log.Printf("[ice] Failed to listen on physical UDP: %v", err)
+			}
+		} else {
+			log.Printf("[ice] Failed to resolve physical UDP addr: %v", err)
+		}
+
 		se.SetIPFilter(func(ip net.IP) bool {
 			// Only allow the physical adapter's IP for ICE
 			allowed := ip.String() == physicalIP
@@ -370,9 +387,7 @@ func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
-	if mt == msgData {
-		log.Printf("[dc-out] conn %d: sending %d bytes to server", connID, len(payload))
-	}
+	// High-frequency data transmission logging removed to prevent terminal I/O latency.
 	j.dc.Send(buf)
 }
 
@@ -403,16 +418,13 @@ func (j *Joiner) handleDCMessage(data []byte) {
 			ch <- fmt.Errorf("%s", errMsg)
 		}
 	case msgData:
-		log.Printf("[dc-in] conn %d: received %d bytes from server", connID, len(payload))
 		j.mu.Lock()
 		conn := j.socksConns[connID]
 		j.mu.Unlock()
 		if conn != nil {
-			n, err := conn.Write(payload)
+			_, err := conn.Write(payload)
 			if err != nil {
 				log.Printf("[dc-in] conn %d: write error: %v", connID, err)
-			} else {
-				log.Printf("[dc-in] conn %d: wrote %d bytes to local", connID, n)
 			}
 		} else {
 			log.Printf("[dc-in] conn %d: no local conn found!", connID)
@@ -580,9 +592,25 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 				parts := strings.Fields(ice.Candidate)
 				if len(parts) >= 5 {
 					candIP := parts[4]
-					if net.ParseIP(candIP) != nil && !j.remoteIPs[candIP] {
-						j.remoteIPs[candIP] = true
-						log.Printf("[bypass] remote ICE candidate IP: %s", candIP)
+					parsedIP := net.ParseIP(candIP)
+					if parsedIP != nil {
+						// === ELIMINATE ICE FAILURE MODES ===
+						// 1. Skip IPv6 candidates completely to avoid routing/connection issues
+						if parsedIP.To4() == nil {
+							log.Printf("[bypass] Ignoring remote IPv6 candidate: %s", candIP)
+							return
+						}
+						// 2. Skip private IPv4 candidates (like Docker 172.17.0.1) as they are unreachable
+						// and can trick the ICE agent into choosing a dead nominated pair
+						if isPrivateIP(parsedIP) {
+							log.Printf("[bypass] Ignoring unreachable remote private candidate: %s", candIP)
+							return
+						}
+
+						if !j.remoteIPs[candIP] {
+							j.remoteIPs[candIP] = true
+							log.Printf("[bypass] remote ICE candidate IP: %s", candIP)
+						}
 					}
 				}
 			}
@@ -598,7 +626,8 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 		sdpStr, _ := sdp["sdp"].(string)
 		log.Printf("Remote SDP: %s (answerSent=%v)", sdpType, j.answerSent)
 		if sdpType == "answer" {
-			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdpStr})
+			filteredSDP := filterSDPCandidates(sdpStr)
+			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: filteredSDP})
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
 				j.pc.AddICECandidate(ice)
@@ -610,7 +639,8 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 				log.Println("Ignoring duplicate offer (answer already sent)")
 				return
 			}
-			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sdpStr})
+			filteredSDP := filterSDPCandidates(sdpStr)
+			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: filteredSDP})
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
 				j.pc.AddICECandidate(ice)
@@ -736,6 +766,10 @@ func (j *Joiner) Close() {
 	if j.ws != nil {
 		j.ws.Close()
 	}
+	if j.udpListener != nil {
+		j.udpListener.Close()
+		log.Printf("[ice] Shared UDP mux closed.")
+	}
 	StopCaptchaProxy()
 }
 
@@ -750,4 +784,48 @@ func getPhysicalIP() string {
 	defer conn.Close()
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	return localAddr.IP.String()
+}
+
+// isPrivateIP checks if the IP belongs to private subnetworks (RFC 1918, RFC 4193 etc).
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	privateBlocks := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+	for _, block := range privateBlocks {
+		_, subnet, _ := net.ParseCIDR(block)
+		if subnet != nil && subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterSDPCandidates parses an SDP string and strips out candidate lines (a=candidate:)
+// that belong to IPv6 or private IPv4 subnets, preventing ICE from trying unreachable paths.
+func filterSDPCandidates(sdp string) string {
+	lines := strings.Split(sdp, "\n")
+	var out []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "a=candidate:") {
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 5 {
+				ipStr := parts[4]
+				ip := net.ParseIP(ipStr)
+				if ip != nil {
+					if ip.To4() == nil || isPrivateIP(ip) {
+						log.Printf("[sdp-filter] Stripping remote inline candidate: %s", ipStr)
+						continue // skip this line
+					}
+				}
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }

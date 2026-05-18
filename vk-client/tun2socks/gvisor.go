@@ -33,7 +33,7 @@ func (e *Engine) Start() error {
 	key := &engine.Key{
 		Device: "tun://" + e.adapterName,
 		Proxy:  e.socksURL,
-		MTU:    1500,
+		MTU:    1400,
 	}
 	engine.Insert(key)
 	engine.Start()

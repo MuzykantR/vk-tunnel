@@ -22,15 +22,19 @@ systemd-install:
 	@echo "Installing systemd services..."
 	@sudo bash -c "cat << 'EOF' > /etc/systemd/system/vk-vpn-daemon.service\n\
 [Unit]\n\
-Description=VK VPN WebRTC Daemon\n\
+Description=VK WebRTC VPN Daemon\n\
 After=network.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
+User=root\n\
 WorkingDirectory=$(DIR)/vk-vpn-server\n\
-ExecStart=$(DIR)/vk-vpn-server/vk-vpn-daemon\n\
+ExecStart=$(DIR)/vk-vpn-server/vk-vpn-daemon --cookies=cookies.json --port=8080\n\
 Restart=always\n\
 RestartSec=3\n\
+TimeoutStopSec=2\n\
+StandardOutput=journal\n\
+StandardError=journal\n\
 \n\
 [Install]\n\
 WantedBy=multi-user.target\n\
@@ -42,10 +46,13 @@ After=network.target vk-vpn-daemon.service\n\
 \n\
 [Service]\n\
 Type=simple\n\
+User=root\n\
 WorkingDirectory=$(DIR)/vk-vpn-bot\n\
 ExecStart=$(DIR)/vk-vpn-bot/venv/bin/python main.py\n\
 Restart=always\n\
 RestartSec=3\n\
+StandardOutput=journal\n\
+StandardError=journal\n\
 \n\
 [Install]\n\
 WantedBy=multi-user.target\n\

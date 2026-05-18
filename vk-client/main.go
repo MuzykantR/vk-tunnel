@@ -36,6 +36,9 @@ func NewApp() *App {
 func (a *App) Connect(uri string) error {
 	log.Printf("Connecting to VPN via URI: %s", uri)
 
+	// 0. Perform deep network cleanup to mimic the "reboot effect"
+	wintun.CleanupAllStaleState(a.defaultGW)
+
 	// 1. Start WebRTC client — establishes ICE + DC + SOCKS5 listener
 	log.Println("Starting VPN Core Client...")
 	bypassIPs, err := clientAPI.StartClient(uri, 1080)
@@ -66,6 +69,10 @@ func (a *App) Connect(uri string) error {
 	log.Printf("Using TUN adapter: %s", tunName)
 	if err := wintun.ConfigureInterface(tunName, a.wintunIP, "255.255.255.0"); err != nil {
 		return err
+	}
+	// Set MTU to 1400 to prevent UDP fragmentation issues over Docker/VPN networks
+	if err := wintun.SetMTU(tunName, 1400); err != nil {
+		log.Printf("Warning: failed to set MTU: %v", err)
 	}
 
 	// 5. Bypass DNS servers so DNS resolves instantly (not through broken UDP tunnel)
