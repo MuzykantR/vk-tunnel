@@ -4,6 +4,8 @@ import (
 	"context"
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -100,9 +102,19 @@ func (a *App) Disconnect() {
 }
 
 func main() {
+	// Redirect logs to app.log next to the executable for easy debugging
+	exe, err := os.Executable()
+	if err == nil {
+		logFile, err := os.OpenFile(filepath.Join(filepath.Dir(exe), "app.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err == nil {
+			log.SetOutput(logFile)
+			defer logFile.Close()
+		}
+	}
+
 	app := NewApp()
 
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:  "Partizan VPN",
 		Width:  800,
 		Height: 600,

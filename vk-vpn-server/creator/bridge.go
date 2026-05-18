@@ -43,6 +43,10 @@ func NewBridge(wsURL string, ice vkice.ICEConfig, appVer, protoVer string) (*Bri
 		appVersion:   appVer,
 		protoVersion: protoVer,
 	}
+	sess.OnCloseReq = func() {
+		log.Println("[creator] PeerConnection disconnected/failed. Initiating call recycle...")
+		b.Close()
+	}
 	b.p2p = NewP2PHandler(b)
 	b.p2p.setupCallbacks()
 	if err := b.p2p.Init(); err != nil {
@@ -269,7 +273,8 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	case "participant-left", "hungup":
 		if pid, ok := parsePID(msg["participantId"]); ok {
 			delete(b.peers, pid)
-			log.Printf("[vk-ws]    Participant %d left", pid)
+			log.Printf("[vk-ws]    Participant %d left. Closing bridge to recycle session...", pid)
+			b.Close()
 		}
 	}
 }

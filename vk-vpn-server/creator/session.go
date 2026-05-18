@@ -39,7 +39,8 @@ type TunnelSession struct {
 	dcMu      sync.Mutex
 	conns     sync.Map
 
-	onICE func(*webrtc.ICECandidate)
+	onICE      func(*webrtc.ICECandidate)
+	OnCloseReq func()
 }
 
 func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
@@ -56,6 +57,11 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		log.Printf("[creator] Connection: %s", st.String())
+		if st == webrtc.PeerConnectionStateDisconnected || st == webrtc.PeerConnectionStateFailed {
+			if s.OnCloseReq != nil {
+				s.OnCloseReq()
+			}
+		}
 	})
 
 	// Audio + Video tracks (required by VK for call validity)
