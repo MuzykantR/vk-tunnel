@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -41,6 +42,7 @@ type Joiner struct {
 	remotePeerID  *int64
 	pc            *webrtc.PeerConnection
 	dc            *webrtc.DataChannel
+	rawDC         datachannel.ReadWriteCloser // non-nil when Detach() succeeded
 	remoteSet     bool
 	pendingICE    []webrtc.ICECandidateInit
 	answerSent    bool
@@ -51,7 +53,6 @@ type Joiner struct {
 	connectCh     map[uint32]chan error  // signals ConnectOK/ConnectErr per conn
 	connIDSeq     uint32
 	connIDMu      sync.Mutex
-	udpListener   *net.UDPConn
 	closeOnce     sync.Once
 	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
 	iceRestartMu  sync.Mutex
@@ -310,57 +311,30 @@ func (j *Joiner) initPC() {
 		ice = append(ice, webrtc.ICEServer{URLs: urls, Username: j.joinResp.TurnUser, Credential: j.joinResp.TurnCred})
 	}
 
-	// Bind ICE to physical adapter ONLY.
-	// Without this, ICE uses 0.0.0.0 and routing table changes cause source IP shift → ICE dies.
+	// Minimal SettingEngine, matching whitelist-bypass's approach: trust the
+	// routing table to steer ICE through the physical adapter (we install
+	// /32 bypass routes for every remote candidate IP synchronously, before
+	// pion ever sends a packet). The previous SetNAT1To1IPs / SetIPFilter /
+	// SetICEUDPMux / SetInterfaceFilter combo was a brittle workaround that
+	// died as soon as Windows touched the routing table during a route ADD.
 	se := webrtc.SettingEngine{}
 	se.SetNetworkTypes([]webrtc.NetworkType{
 		webrtc.NetworkTypeUDP4,
 		webrtc.NetworkTypeTCP4,
 	})
-
-	// Find the physical adapter's IP (non-loopback, non-TUN, IPv4)
-	physicalIP := getPhysicalIP()
-	if physicalIP != "" {
-		log.Printf("[ice] Binding ICE to physical adapter IP: %s", physicalIP)
-		se.SetNAT1To1IPs([]string{physicalIP}, webrtc.ICECandidateTypeHost)
-
-		// Create a UDP listener bound directly to the physical adapter IP to lock routing
-		addr, err := net.ResolveUDPAddr("udp4", physicalIP+":0")
-		if err == nil {
-			udpListener, err := net.ListenUDP("udp4", addr)
-			if err == nil {
-				log.Printf("[ice] Shared UDP mux bound successfully to %s", udpListener.LocalAddr().String())
-				j.udpListener = udpListener
-				se.SetICEUDPMux(webrtc.NewICEUDPMux(nil, udpListener))
-			} else {
-				log.Printf("[ice] Failed to listen on physical UDP: %v", err)
-			}
-		} else {
-			log.Printf("[ice] Failed to resolve physical UDP addr: %v", err)
-		}
-
-		se.SetIPFilter(func(ip net.IP) bool {
-			// Only allow the physical adapter's IP for ICE
-			allowed := ip.String() == physicalIP
-			if !allowed {
-				log.Printf("[ice] filtering out IP: %s", ip.String())
-			}
-			return allowed
-		})
-	}
-
-	se.SetInterfaceFilter(func(iface string) bool {
-		excluded := []string{"WLVPN", "tun", "Wintun", "TAP", "Loopback", "Hyper-V", "vEthernet"}
-		ifaceLower := strings.ToLower(iface)
-		for _, ex := range excluded {
-			if strings.Contains(ifaceLower, strings.ToLower(ex)) {
-				log.Printf("[ice] excluding interface: %s", iface)
-				return false
-			}
-		}
-		log.Printf("[ice] using interface: %s", iface)
-		return true
-	})
+	// Detach DataChannels so the relay reads from a raw ReadWriteCloser in
+	// its own goroutine. Without this, pion drives our OnMessage callback
+	// from its internal SCTP reader and any slowness in the callback chain
+	// (e.g. backpressure from the local SOCKS socket) throttles the whole
+	// DataChannel — which is exactly what was happening in our high-RTT,
+	// high-parallel-conn tests (read OK pacgs of 20 connect-OKs at a time).
+	se.DetachDataChannels()
+	// Bigger SCTP receive buffer so high-BDP links (RTT ~109 ms × 50 Mbps
+	// = ~700 KB BDP) do not throttle on the default ~1 MB cap.
+	se.SetSCTPMaxReceiveBufferSize(8 * 1024 * 1024)
+	// Skip per-packet SCTP checksum — pion supports this opt-in for ~10%
+	// CPU / latency win and DTLS already authenticates every frame.
+	se.EnableSCTPZeroChecksum(true)
 
 	me := &webrtc.MediaEngine{}
 	me.RegisterDefaultCodecs()
@@ -404,17 +378,17 @@ func (j *Joiner) initPC() {
 	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
-	// Tunnel DataChannel (Negotiated ID: 2).
-	// Ordered=false → no head-of-line blocking when one UDP packet is lost.
-	// No MaxRetransmits/MaxPacketLifeTime → SCTP is reliable.
-	// Required for MsgConnect / MsgConnectOK / MsgClose to be delivered.
+	// Tunnel DataChannel (Negotiated ID: 2). DEFAULTS = ordered + reliable.
+	// We rely on Detach() to keep the SCTP reader unblocked under load
+	// — the read loop pulls bytes off the wire into Go-side buffers, so a
+	// slow consumer downstream never freezes the SCTP transport. Same
+	// approach whitelist-bypass uses; it sustains 15 Mbps with this exact
+	// config.
 	neg := true
 	id := uint16(2)
-	tunnelOrdered := false
 	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
 		Negotiated: &neg,
 		ID:         &id,
-		Ordered:    &tunnelOrdered,
 	})
 	if err != nil {
 		return
@@ -422,11 +396,21 @@ func (j *Joiner) initPC() {
 	j.dc = dc
 	dc.OnOpen(func() {
 		log.Println("VPN tunnel DataChannel open")
+		// Detach the DC: read on our own goroutine so pion's SCTP reader
+		// is never blocked by our message handler. This is the same model
+		// whitelist-bypass uses and sustains 15 Mbps with it.
+		raw, err := dc.Detach()
+		if err != nil {
+			log.Printf("Joiner: dc.Detach failed (falling back to OnMessage): %v", err)
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				j.handleDCMessage(msg.Data)
+			})
+		} else {
+			j.rawDC = raw
+			go j.dcReadLoop()
+		}
 		j.readyOnce.Do(func() { close(j.readyCh) })
 		go j.listenSOCKS()
-	})
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		j.handleDCMessage(msg.Data)
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -440,16 +424,44 @@ func (j *Joiner) initPC() {
 
 // ---------- DC Relay (joiner side) ----------
 
-func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
-	if j.dc == nil {
-		return
+// dcReadLoop reads framed messages off the detached DataChannel and dispatches
+// them to handleDCMessage. Runs in its own goroutine, owned by the joiner.
+func (j *Joiner) dcReadLoop() {
+	// 64 KB is the maximum message size SCTP will deliver to us; sized to
+	// match max-dc-buf / chunk semantics used by whitelist-bypass.
+	buf := make([]byte, 64*1024)
+	for {
+		n, isString, err := j.rawDC.ReadDataChannel(buf)
+		if err != nil {
+			log.Printf("Joiner: dc read loop exiting: %v", err)
+			return
+		}
+		if isString || n == 0 {
+			continue
+		}
+		cp := make([]byte, n)
+		copy(cp, buf[:n])
+		j.handleDCMessage(cp)
 	}
+}
+
+func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	buf := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
-	// High-frequency data transmission logging removed to prevent terminal I/O latency.
-	j.dc.Send(buf)
+	if j.rawDC != nil {
+		// Raw write — bypasses pion's OnMessage scheduling and produces
+		// far less goroutine churn than dc.Send under sustained load.
+		if _, err := j.rawDC.Write(buf); err != nil {
+			// rawDC.Write only errors when the DC is gone; nothing useful
+			// to do here besides drop the frame — TCP will retransmit.
+		}
+		return
+	}
+	if j.dc != nil {
+		j.dc.Send(buf)
+	}
 }
 
 func (j *Joiner) handleDCMessage(data []byte) {
@@ -910,6 +922,9 @@ func (j *Joiner) Close() {
 		}
 		j.mu.Unlock()
 
+		if j.rawDC != nil {
+			j.rawDC.Close()
+		}
 		if j.dc != nil {
 			j.dc.Close()
 		}
@@ -918,10 +933,6 @@ func (j *Joiner) Close() {
 		}
 		if j.ws != nil {
 			j.ws.Close()
-		}
-		if j.udpListener != nil {
-			j.udpListener.Close()
-			log.Printf("[ice] Shared UDP mux closed.")
 		}
 		StopCaptchaProxy()
 		log.Println("Joiner: closed.")
@@ -1023,119 +1034,6 @@ func (j *Joiner) requestICERestart() {
 		"sdp": map[string]interface{}{"type": "offer", "sdp": offer.SDP},
 	})
 	log.Println("ICE restart: sent renegotiation offer to creator")
-}
-
-// getPhysicalIP discovers the IP of the default physical adapter. It first tries doing a
-// UDP "connect" to an external IP, then validates that the resolved IP does not belong to
-// a virtual adapter or the VPN subnet. If validation fails, it scans active network interfaces.
-func getPhysicalIP() string {
-	dialIP := ""
-	conn, err := net.Dial("udp4", "8.8.8.8:80")
-	if err == nil {
-		localAddr := conn.LocalAddr().(*net.UDPAddr)
-		dialIP = localAddr.IP.String()
-		conn.Close()
-	}
-
-	if dialIP != "" {
-		iface, err := getInterfaceByIP(dialIP)
-		if err == nil {
-			ifaceName := strings.ToLower(iface.Name)
-			isVirtual := false
-			virtualKeywords := []string{"wlvpn", "wintun", "tun", "tap", "loopback", "hyper-v", "vpn", "virtual", "host-only", "virtualbox", "vmware"}
-			for _, kw := range virtualKeywords {
-				if strings.Contains(ifaceName, kw) {
-					isVirtual = true
-					break
-				}
-			}
-			if strings.HasPrefix(dialIP, "10.8.0.") {
-				isVirtual = true
-			}
-			if !isVirtual {
-				return dialIP
-			}
-			log.Printf("[ice] Dialed IP %s belongs to a virtual/VPN interface '%s' (IP prefix/name match), scanning physical interfaces...", dialIP, iface.Name)
-		}
-	}
-
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		log.Printf("[ice] failed to list interfaces: %v", err)
-		return dialIP
-	}
-
-	for _, iface := range ifaces {
-		if (iface.Flags & net.FlagUp) == 0 {
-			continue
-		}
-		if (iface.Flags & net.FlagLoopback) != 0 {
-			continue
-		}
-		ifaceName := strings.ToLower(iface.Name)
-		isVirtual := false
-		virtualKeywords := []string{"wlvpn", "wintun", "tun", "tap", "loopback", "hyper-v", "vpn", "virtual", "host-only", "virtualbox", "vmware"}
-		for _, kw := range virtualKeywords {
-			if strings.Contains(ifaceName, kw) {
-				isVirtual = true
-				break
-			}
-		}
-		if isVirtual {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-				ipStr := ip.String()
-				if strings.HasPrefix(ipStr, "10.8.0.") {
-					continue
-				}
-				log.Printf("[ice] Found physical adapter candidate IP: %s (interface: %s)", ipStr, iface.Name)
-				return ipStr
-			}
-		}
-	}
-
-	return dialIP
-}
-
-func getInterfaceByIP(ipStr string) (*net.Interface, error) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-	targetIP := net.ParseIP(ipStr)
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip != nil && ip.Equal(targetIP) {
-				return &iface, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("interface not found for IP %s", ipStr)
 }
 
 // isPrivateIP checks if the IP belongs to private subnetworks (RFC 1918, RFC 4193 etc).

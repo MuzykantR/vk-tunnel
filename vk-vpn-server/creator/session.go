@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -23,25 +24,19 @@ const (
 	MsgUDPReply   byte = 0x07
 )
 
-// sendBufSize is the per-connection outbound queue depth (number of frames).
-// 512 × 32 KB ≈ 16 MB of in-flight data per connection max.
-// When the queue is full we drop new data instead of blocking the reader
-// goroutine and causing head-of-line blocking on the DataChannel.
-const sendBufSize = 512
-
 type dcConn struct {
 	conn net.Conn
-	// inCh receives frames sent from the joiner to the remote TCP peer.
+	// inCh receives data the joiner sent for this connection. A small buffer
+	// is enough — the writer goroutine just copies to conn.Write without
+	// extra processing.
 	inCh chan []byte
-	// outCh queues frames that the reader goroutine wants to send back to the joiner.
-	// Bounded: if the joiner is too slow we drop frames rather than stalling the reader.
-	outCh chan []byte
 }
 
 // TunnelSession is the creator-side WebRTC peer with a negotiated tunnel DataChannel.
 type TunnelSession struct {
 	pc        *webrtc.PeerConnection
 	dc        *webrtc.DataChannel
+	rawDC     datachannel.ReadWriteCloser // non-nil when Detach() succeeded
 	remoteSet bool
 	pending   []webrtc.ICECandidateInit
 	mu        sync.Mutex
@@ -50,21 +45,26 @@ type TunnelSession struct {
 	onICE      func(*webrtc.ICECandidate)
 	OnCloseReq func()
 
-	dcSendCh  chan []byte
-	dcStopCh  chan struct{}
 	closeOnce sync.Once
 }
 
 func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
+	// SettingEngine matched to whitelist-bypass:
+	//   - DetachDataChannels: relay reads from raw ReadWriteCloser, never
+	//     blocks the SCTP reader on a slow consumer.
+	//   - SetSCTPMaxReceiveBufferSize: 8 MB so high-BDP links don't throttle.
+	//   - EnableSCTPZeroChecksum: ~10% CPU win; DTLS already authenticates.
+	se := webrtc.SettingEngine{}
+	se.DetachDataChannels()
+	se.SetSCTPMaxReceiveBufferSize(8 * 1024 * 1024)
+	se.EnableSCTPZeroChecksum(true)
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 	if err != nil {
 		return nil, err
 	}
-	s := &TunnelSession{
-		pc:       pc,
-		dcSendCh: make(chan []byte, 4096), // deep enough for many in-flight frames
-		dcStopCh: make(chan struct{}),
-	}
+	s := &TunnelSession{pc: pc}
 
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
 		log.Printf("[creator] ICE: %s", st.String())
@@ -96,21 +96,14 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
-	// Tunnel DataChannel (Negotiated ID: 2).
-	// Ordered=false → no head-of-line blocking when one UDP packet is lost.
-	// MaxRetransmits/MaxPacketLifeTime NOT set → SCTP is reliable.
-	// Our framed protocol REQUIRES reliable delivery for control frames
-	// (MsgConnect, MsgConnectOK, MsgClose) — a lost MsgConnect causes a
-	// 30 s SOCKS timeout on the client. The connID in every frame makes
-	// out-of-order delivery safe for data frames, so unordered+reliable
-	// is the right trade-off.
+	// Tunnel DataChannel (Negotiated ID: 2). DEFAULTS = ordered + reliable.
+	// Detach() + a Go-side read loop is what keeps the SCTP reader unblocked
+	// under load. Same model as whitelist-bypass.
 	neg := true
 	id := uint16(2)
-	tunnelOrdered := false
 	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
 		Negotiated: &neg,
 		ID:         &id,
-		Ordered:    &tunnelOrdered,
 	})
 	if err != nil {
 		pc.Close()
@@ -120,11 +113,16 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 
 	dc.OnOpen(func() {
 		log.Println("[creator] tunnel DataChannel open — relay bridge active")
-		go s.dcSendLoop()
-	})
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		s.handleDCMessage(msg.Data)
+		raw, err := dc.Detach()
+		if err != nil {
+			log.Printf("[creator] dc.Detach failed, falling back to OnMessage: %v", err)
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				s.handleDCMessage(msg.Data)
+			})
+			return
+		}
+		s.rawDC = raw
+		go s.dcReadLoop()
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -140,26 +138,22 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	return s, nil
 }
 
-// dcSendLoop is the single goroutine that drains dcSendCh and calls dc.Send().
-// Serialising sends here (rather than calling dc.Send concurrently from many goroutines)
-// avoids SCTP write contention and makes it easy to apply backpressure.
-func (s *TunnelSession) dcSendLoop() {
+// dcReadLoop drains the detached DataChannel into handleDCMessage. Goroutine
+// owned by the session; exits when the DC closes or PC is torn down.
+func (s *TunnelSession) dcReadLoop() {
+	buf := make([]byte, 64*1024)
 	for {
-		select {
-		case buf, ok := <-s.dcSendCh:
-			if !ok {
-				return
-			}
-			if s.dc != nil && s.dc.ReadyState() == webrtc.DataChannelStateOpen {
-				if err := s.dc.Send(buf); err != nil {
-					// DataChannel is dying — drain and exit.
-					log.Printf("[creator] dc.Send error: %v", err)
-					return
-				}
-			}
-		case <-s.dcStopCh:
+		n, isString, err := s.rawDC.ReadDataChannel(buf)
+		if err != nil {
+			log.Printf("[creator] dc read loop exiting: %v", err)
 			return
 		}
+		if isString || n == 0 {
+			continue
+		}
+		cp := make([]byte, n)
+		copy(cp, buf[:n])
+		s.handleDCMessage(cp)
 	}
 }
 
@@ -204,8 +198,10 @@ func (s *TunnelSession) AddICECandidate(c webrtc.ICECandidateInit) error {
 
 func (s *TunnelSession) Close() {
 	s.closeOnce.Do(func() {
-		close(s.dcStopCh)
 		s.closeAllConns()
+		if s.rawDC != nil {
+			s.rawDC.Close()
+		}
 		if s.pc != nil {
 			s.pc.Close()
 		}
@@ -260,20 +256,22 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 	}
 }
 
-// sendDCFrame enqueues a frame on the shared sender channel.
-// If the channel is full (joiner too slow / DC congested) the frame is dropped
-// instead of blocking the calling goroutine (which is reading from remote TCP).
+// sendDCFrame writes a framed message into the detached DataChannel. Pion's
+// raw ReadWriteCloser is safe for concurrent Write — internally each call
+// becomes one SCTP datagram, so we don't need to serialise through a channel.
 func (s *TunnelSession) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	buf := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
-	select {
-	case s.dcSendCh <- buf:
-	default:
-		// DataChannel send queue full — drop this frame.
-		// TCP will retransmit; we just lose throughput, not the connection.
-		log.Printf("[dc] conn %d dcSendCh full, dropping %d-byte frame (type=%02x)", connID, len(buf), mt)
+	if s.rawDC != nil {
+		if _, err := s.rawDC.Write(buf); err != nil {
+			// DC torn down; the connection cleanup will follow shortly.
+		}
+		return
+	}
+	if s.dc != nil && s.dc.ReadyState() == webrtc.DataChannelStateOpen {
+		s.dc.Send(buf)
 	}
 }
 
@@ -298,9 +296,8 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 		return
 	}
 	dc := &dcConn{
-		conn:  conn,
-		inCh:  make(chan []byte, 256),
-		outCh: make(chan []byte, sendBufSize),
+		conn: conn,
+		inCh: make(chan []byte, 256),
 	}
 	s.conns.Store(connID, dc)
 	s.sendDCFrame(connID, MsgConnectOK, nil)
