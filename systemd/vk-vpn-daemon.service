@@ -12,6 +12,8 @@ RestartSec=3
 TimeoutStopSec=2
 StandardOutput=journal
 StandardError=journal
+# Go logs use HH:MM:SS.mmm [tag] only — journald adds the calendar date once.
+Environment=VK_VPN_LOG_LEVEL=info
 
 [Install]
 WantedBy=multi-user.target

@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,10 +50,9 @@ func ParseAndDecryptURI(uri string) (*VPNPayload, error) {
 		return nil, fmt.Errorf("failed to decode ciphertext: %w", err)
 	}
 
-	// 2. Decode MASTER_KEY from hex
-	key, err := hex.DecodeString(MASTER_KEY_HEX)
+	key, err := MasterKeyBytes()
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode master key: %w", err)
+		return nil, fmt.Errorf("master key: %w", err)
 	}
 
 	// 3. Initialize AES-GCM

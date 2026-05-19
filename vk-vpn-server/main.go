@@ -12,9 +12,12 @@ import (
 	"github.com/vk-vpn/server/config"
 	"github.com/vk-vpn/server/creator"
 	"github.com/vk-vpn/server/daemon"
+
+	"github.com/vk-vpn/client/logx"
 )
 
 func main() {
+	logx.Init()
 	cookiesPath := flag.String("cookies", "cookies.json", "Path to cookies.json file")
 	apiPort := flag.Int("port", 8080, "Local API port for the Bot")
 	resources := flag.String("resources", "default", "Resource mode: moderate | default | unlimited | custom (whitelist-bypass)")

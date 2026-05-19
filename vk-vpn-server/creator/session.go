@@ -11,7 +11,9 @@ import (
 
 	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
+	"github.com/vk-vpn/client/logx"
 	"github.com/vk-vpn/client/tunnel"
+	vkwebrtc "github.com/vk-vpn/client/webrtc"
 )
 
 // Message types for the framed DC protocol (compatible with whitelist-bypass)
@@ -27,10 +29,10 @@ const (
 
 type dcConn struct {
 	conn net.Conn
-	// inCh receives data the joiner sent for this connection. A small buffer
-	// is enough — the writer goroutine just copies to conn.Write without
-	// extra processing.
+	addr string
 	inCh chan []byte
+	tx   int64
+	rx   int64
 }
 
 // SessionOpts — tunables from whitelist-bypass headless --resources / join-link obfuscation.
@@ -102,11 +104,14 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	}
 
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
-		log.Printf("[creator] ICE: %s", st.String())
+		logx.L("creator", "ICE %s", st.String())
+		if st == webrtc.ICEConnectionStateConnected || st == webrtc.ICEConnectionStateCompleted {
+			go vkwebrtc.LogSelectedICEPair(pc, "creator")
+		}
 	})
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
-		log.Printf("[creator] Connection: %s", st.String())
+		logx.L("creator", "PC %s", st.String())
 		if st == webrtc.PeerConnectionStateFailed {
 			if s.OnCloseReq != nil {
 				s.OnCloseReq()
@@ -308,6 +313,9 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 	payload := data[5:]
 
 	switch mt {
+	case tunnel.MsgPing:
+		s.sendDCFrame(tunnel.ControlConnID, tunnel.MsgPong, nil)
+		return
 	case MsgConnect:
 		go s.connectTCP(connID, string(payload))
 	case MsgUDP:
@@ -399,7 +407,7 @@ func (s *TunnelSession) handleUDP(connID uint32, payload []byte) {
 }
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
-	log.Printf("[dc] CONNECT %d -> %s", connID, addr)
+	logx.DCOpen(connID, addr)
 
 	// Reject unroutable IPv6 destinations before we try to dial them — these
 	// always fail with "invalid argument" on the VPS and waste a 10 s dial timeout.
@@ -414,42 +422,42 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		log.Printf("[dc] CONNECT %d failed: %v", connID, err)
+		logx.DCConnectFail(connID, addr, err)
 		s.sendDCFrame(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
 	dc := &dcConn{
 		conn: conn,
+		addr: addr,
 		inCh: make(chan []byte, 256),
 	}
 	s.conns.Store(connID, dc)
 	s.sendDCFrame(connID, MsgConnectOK, nil)
-	log.Printf("[dc] CONNECTED %d -> %s", connID, addr)
 
-	// Writer: joiner → remote TCP (data coming from the client).
 	go func() {
 		for data := range dc.inCh {
-			conn.Write(data)
+			n, _ := conn.Write(data)
+			dc.tx += int64(n)
 		}
 		conn.Close()
 	}()
 
-	// Reader: remote TCP → joiner. Pause reads when DC send buffer is full (WLB max-dc-buf).
 	buf := make([]byte, s.readBuf)
 	for {
 		s.waitDCBackpressure()
 		n, err := conn.Read(buf)
 		if n > 0 {
+			dc.rx += int64(n)
 			s.sendDCFrame(connID, MsgData, buf[:n])
 		}
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-				log.Printf("[dc] conn %d read error: %v", connID, err)
+				logx.Debug("dc", "read id=%d: %v", connID, err)
 			}
 			break
 		}
 	}
-	log.Printf("[dc] conn %d closed", connID)
+	logx.DCClose(connID, addr, dc.tx, dc.rx)
 	s.sendDCFrame(connID, MsgClose, nil)
 	s.conns.Delete(connID)
 }

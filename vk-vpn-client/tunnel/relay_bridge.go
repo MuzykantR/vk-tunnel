@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vk-vpn/client/logx"
 	"github.com/vk-vpn/client/socks"
 )
 
@@ -32,6 +33,15 @@ type RelayBridge struct {
 	listenerMu sync.Mutex
 	listener   net.Listener
 	closed     atomic.Bool
+	onPong     func()
+}
+
+// SetOnPong is called when a control MsgPong arrives (joiner watchdog).
+func (rb *RelayBridge) SetOnPong(fn func()) { rb.onPong = fn }
+
+// SendControl sends a framed control message (ping/pong/config).
+func (rb *RelayBridge) SendControl(msgType byte, payload []byte) {
+	rb.send(ControlConnID, msgType, payload)
 }
 
 func NewRelayBridge(tunnel DataTunnel, mode string, readBuf int, logFn func(string, ...interface{})) *RelayBridge {
@@ -63,16 +73,29 @@ func (rb *RelayBridge) send(connID uint32, msgType byte, payload []byte) {
 
 func (rb *RelayBridge) handleTunnelData(data []byte) {
 	DecodeFrames(data, func(connID uint32, msgType byte, payload []byte) {
-		if connID == ControlConnID && msgType == MsgConfig {
-			fps, batch, ok := DecodeVP8Config(payload)
-			if !ok {
+		if connID == ControlConnID {
+			switch msgType {
+			case MsgConfig:
+				fps, batch, ok := DecodeVP8Config(payload)
+				if !ok {
+					return
+				}
+				if rb.mode == "creator" {
+					rb.logFn("relay: peer vp8 config fps=%d batch=%d", fps, batch)
+					rb.tunnel.Reconfigure(fps, batch)
+				}
+				return
+			case MsgPing:
+				if rb.mode == "creator" {
+					rb.send(ControlConnID, MsgPong, nil)
+				}
+				return
+			case MsgPong:
+				if rb.mode == "joiner" && rb.onPong != nil {
+					rb.onPong()
+				}
 				return
 			}
-			if rb.mode == "creator" {
-				rb.logFn("relay: peer vp8 config fps=%d batch=%d", fps, batch)
-				rb.tunnel.Reconfigure(fps, batch)
-			}
-			return
 		}
 		switch rb.mode {
 		case "joiner":
@@ -118,6 +141,8 @@ func (rb *RelayBridge) handleJoinerMessage(connID uint32, msgType byte, payload 
 	case MsgClose:
 		sc.conn.Close()
 		rb.conns.Delete(connID)
+	case MsgPing, MsgPong:
+		// handled at control connID
 	}
 }
 
@@ -174,20 +199,22 @@ func (rb *RelayBridge) handleUDP(connID uint32, payload []byte) {
 }
 
 func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
-	rb.logFn("relay: CONNECT %d -> %s", connID, addr)
+	logx.DCOpen(connID, addr)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
+		logx.DCConnectFail(connID, addr, err)
 		rb.send(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
 	rb.conns.Store(connID, conn)
 	rb.send(connID, MsgConnectOK, nil)
-	rb.logFn("relay: CONNECTED %d -> %s", connID, addr)
 
+	var tx, rx int64
 	buf := make([]byte, rb.readBuf)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
+			rx += int64(n)
 			rb.send(connID, MsgData, buf[:n])
 		}
 		if err != nil {
@@ -196,6 +223,7 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 	}
 	rb.send(connID, MsgClose, nil)
 	rb.conns.Delete(connID)
+	logx.DCClose(connID, addr, tx, rx)
 }
 
 type socksConn struct {

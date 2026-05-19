@@ -19,7 +19,12 @@ import (
 	"vk-client/wintun"
 
 	clientAPI "github.com/vk-vpn/client/api"
+	"github.com/vk-vpn/client/logx"
 )
+
+func init() {
+	logx.Init()
+}
 
 //go:embed all:frontend/dist
 var assets embed.FS

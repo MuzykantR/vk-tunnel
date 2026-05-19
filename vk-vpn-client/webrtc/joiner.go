@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
+	"github.com/vk-vpn/client/logx"
 	"github.com/vk-vpn/client/tunnel"
 )
 
@@ -48,6 +49,7 @@ type Joiner struct {
 	sampleTrack   *webrtc.TrackLocalStaticSample
 	tunnelMode    string
 	relay         *tunnel.RelayBridge
+	tunnelWD      *tunnel.TunnelWatchdog
 	remoteSet     bool
 	firstConnected time.Time
 	pendingICE    []webrtc.ICECandidateInit
@@ -360,9 +362,10 @@ func (j *Joiner) initPC() {
 			j.mu.Lock()
 			if j.firstConnected.IsZero() {
 				j.firstConnected = time.Now()
-				log.Printf("Joiner: first ICE connected at %s", j.firstConnected.Format(time.RFC3339))
+				logx.L("joiner", "first ICE connected")
 			}
 			j.mu.Unlock()
+			go LogSelectedICEPair(j.pc, "joiner")
 			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
 			// Transient disconnect during first ICE handshake is normal (connected→
@@ -461,7 +464,20 @@ func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
 		return
 	}
 	j.mu.Unlock()
-	j.relay = tunnel.NewRelayBridge(t, "joiner", 0, log.Printf)
+	j.relay = tunnel.NewRelayBridge(t, "joiner", 0, logx.TagPrintf("relay"))
+	wd := tunnel.NewTunnelWatchdog(func() {
+		j.relay.SendControl(tunnel.MsgPing, nil)
+	}, tunnel.WatchdogOpts{
+		Interval: 10 * time.Second,
+		MaxMiss:  3,
+		OnUnhealthy: func() {
+			logx.Warn("tunnel", "watchdog unhealthy — ICE restart")
+			go j.requestICERestart()
+		},
+	})
+	j.relay.SetOnPong(wd.NotifyPong)
+	j.tunnelWD = wd
+	wd.Start()
 	j.relay.MarkReady()
 	j.readyOnce.Do(func() { close(j.readyCh) })
 	addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
@@ -715,6 +731,9 @@ func (j *Joiner) Close() {
 
 		if j.vp8Tunnel != nil {
 			j.vp8Tunnel.Stop()
+		}
+		if j.tunnelWD != nil {
+			j.tunnelWD.Stop()
 		}
 		if j.relay != nil {
 			j.relay.Close()

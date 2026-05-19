@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	pion "github.com/pion/webrtc/v3"
+	"github.com/vk-vpn/client/logx"
 	vkice "github.com/vk-vpn/server/webrtc"
 )
 
@@ -91,7 +92,7 @@ func (b *Bridge) Connect() error {
 	b.ws = ws
 	b.vkSeq = 0
 	b.mu.Unlock()
-	log.Println("[vk-ws] Connected")
+	logx.L("vk-ws", "connected")
 
 	b.vkSend("change-media-settings", map[string]interface{}{
 		"mediaSettings": map[string]interface{}{
@@ -214,25 +215,25 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 		// handled below
 	case "response":
 		seq, _ := msg["sequence"].(float64)
-		log.Printf("[vk-ws] <- response seq=%d", int(seq))
+		logx.Debug("vk-ws", "response seq=%d", int(seq))
 		return
 	case "error":
 		errMsg, _ := msg["message"].(string)
 		errCode, _ := msg["error"].(string)
-		log.Printf("[vk-ws] <- ERROR: %s %s", errCode, errMsg)
+		logx.Error("vk-ws", "error %s %s", errCode, errMsg)
 		return
 	default:
-		log.Printf("[vk-ws] <- unknown type: %s", msgType)
+		logx.Warn("vk-ws", "unknown type %s", msgType)
 		return
 	}
 	notif, _ := msg["notification"].(string)
-	log.Printf("[vk-ws] <- %s", notif)
 
 	switch notif {
 	case "connection":
-		log.Println("[vk-ws]    TURN / connection params")
+		logx.L("vk-ws", "TURN / connection params")
 
 	case "transmitted-data":
+		logx.Debug("vk-ws", "signaling frame")
 		data, _ := msg["data"].(map[string]interface{})
 		if data != nil && b.topology == TopologyDirect && b.p2p != nil {
 			b.p2p.OnTransmittedData(data)
@@ -245,10 +246,10 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 
 	case "topology-changed":
 		topo, _ := msg["topology"].(string)
-		log.Printf("[vk-ws]    Topology: %s", topo)
+		logx.L("vk-ws", "topology %s", topo)
 		b.topology = topo
 		if topo != TopologyDirect {
-			log.Printf("[vk-ws]    Not DIRECT — kicking %d peers", len(b.peers))
+			logx.Warn("vk-ws", "not DIRECT — kicking %d peers", len(b.peers))
 			for pid := range b.peers {
 				b.vkSend("remove-participant", map[string]interface{}{
 					"participantId": pid,
@@ -260,9 +261,9 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	case "participant-joined", "participant-added":
 		if pid, ok := parsePID(msg["participantId"]); ok {
 			b.peers[pid] = struct{}{}
-			log.Printf("[vk-ws]    Participant %d joined (total %d, topo=%s)", pid, len(b.peers), b.topology)
+			logx.L("vk-ws", "participant %d joined (total %d topo=%s)", pid, len(b.peers), b.topology)
 			if b.topology != TopologyDirect {
-				log.Printf("[vk-ws]    Kicking %d (need DIRECT P2P)", pid)
+				logx.Warn("vk-ws", "kicking %d (need DIRECT)", pid)
 				b.vkSend("remove-participant", map[string]interface{}{
 					"participantId": pid,
 					"ban":           false,
@@ -275,7 +276,12 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	case "participant-left", "hungup":
 		if pid, ok := parsePID(msg["participantId"]); ok {
 			delete(b.peers, pid)
-			log.Printf("[vk-ws]    Participant %d left (total %d) — waiting for re-join (WLB model)", pid, len(b.peers))
+			logx.L("vk-ws", "participant %d left (total %d)", pid, len(b.peers))
+		}
+
+	default:
+		if notif != "" {
+			logx.L("vk-ws", "notification %s", notif)
 		}
 	}
 }

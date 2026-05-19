@@ -11,6 +11,8 @@ const (
 	MsgUDP        byte = 0x06
 	MsgUDPReply   byte = 0x07
 	MsgConfig     byte = 0x08
+	MsgPing       byte = 0x09
+	MsgPong       byte = 0x0A
 )
 
 const ControlConnID uint32 = 0
