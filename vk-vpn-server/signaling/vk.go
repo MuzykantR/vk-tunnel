@@ -74,7 +74,7 @@ func (s *VKSignaling) httpPost(endpoint string, form url.Values, extraHeaders ma
 
 // FetchCallURL implements the real logic from whitelist-bypass to create a WebRTC call
 // Uses the modern API flow (calls.start -> getCallToken -> anonymLogin -> joinConversation)
-func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, vkJoinLink string, iceJSON []byte, err error) {
+func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, vkJoinLink, okJoinLink string, iceJSON []byte, err error) {
 	log.Printf("Starting VK call via API for peer: %s", peerID)
 
 	appID := "6287487"
@@ -83,7 +83,7 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 	// 1. Get token
 	r, err := s.httpPost("https://login.vk.com/?act=web_token", url.Values{"version": {"1"}, "app_id": {appID}}, nil)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("web_token: %v", err)
+		return "", "", "", nil, fmt.Errorf("web_token: %v", err)
 	}
 	var tok struct {
 		Data struct {
@@ -93,14 +93,14 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 	json.Unmarshal(r, &tok)
 	vkToken := tok.Data.AccessToken
 	if vkToken == "" {
-		return "", "", nil, fmt.Errorf("empty VK token: %s", string(r))
+		return "", "", "", nil, fmt.Errorf("empty VK token: %s", string(r))
 	}
 	auth := map[string]string{"Authorization": "Bearer " + vkToken}
 
 	// 2. Start call
 	r, err = s.httpPost("https://api.vk.com/method/calls.start", url.Values{"v": {apiVersion}, "peer_id": {peerID}}, auth)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("calls.start: %v", err)
+		return "", "", "", nil, fmt.Errorf("calls.start: %v", err)
 	}
 	var call struct {
 		Response struct {
@@ -110,17 +110,17 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 		} `json:"response"`
 	}
 	json.Unmarshal(r, &call)
-	okJoinLink := call.Response.OKJoinLink
+	okJoinLink = call.Response.OKJoinLink
 	vkJoinLink = call.Response.JoinLink
 	if okJoinLink == "" {
-		return "", "", nil, fmt.Errorf("empty ok_join_link: %s", string(r))
+		return "", "", "", nil, fmt.Errorf("empty ok_join_link: %s", string(r))
 	}
 	log.Printf("Call created, OK Join Link: %s, VK Join Link: %s", okJoinLink, vkJoinLink)
 
 	// 3. Get settings (Public Key)
 	r, err = s.httpPost("https://api.vk.com/method/calls.getSettings", url.Values{"v": {apiVersion}}, auth)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("calls.getSettings: %v", err)
+		return "", "", "", nil, fmt.Errorf("calls.getSettings: %v", err)
 	}
 	var settings struct {
 		Response struct {
@@ -135,7 +135,7 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 	// 4. Get call token
 	r, err = s.httpPost("https://api.vk.com/method/messages.getCallToken", url.Values{"v": {apiVersion}, "env": {"production"}}, auth)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("messages.getCallToken: %v", err)
+		return "", "", "", nil, fmt.Errorf("messages.getCallToken: %v", err)
 	}
 	var callToken struct {
 		Response struct {
@@ -159,7 +159,7 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 		"format": {"json"}, "session_data": {string(sd)},
 	}, nil)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("auth.anonymLogin: %v", err)
+		return "", "", "", nil, fmt.Errorf("auth.anonymLogin: %v", err)
 	}
 	var okAuth struct {
 		SessionKey string `json:"session_key"`
@@ -176,18 +176,18 @@ func (s *VKSignaling) FetchCallURL(ctx context.Context, peerID string) (wsURL, v
 		"isVideo": {"true"}, "isAudio": {"false"}, "mediaSettings": {string(ms)},
 	}, nil)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("joinConversation: %v", err)
+		return "", "", "", nil, fmt.Errorf("joinConversation: %v", err)
 	}
 	var joinResp struct {
 		Endpoint string `json:"endpoint"`
 	}
 	json.Unmarshal(r, &joinResp)
 	if joinResp.Endpoint == "" {
-		return "", "", nil, fmt.Errorf("empty WS endpoint: %s", string(r))
+		return "", "", "", nil, fmt.Errorf("empty WS endpoint: %s", string(r))
 	}
 
 	ws := joinResp.Endpoint + "&platform=WEB&appVersion=1.1&version=6&device=browser&capabilities=0&clientType=VK&tgt=join"
-	return ws, vkJoinLink, r, nil
+	return ws, vkJoinLink, okJoinLink, r, nil
 }
 
 // Connect establishes the WebSocket connection to VK's signaling server

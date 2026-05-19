@@ -42,38 +42,65 @@ func (d *Daemon) setLinkInfo(link string) {
 
 func (d *Daemon) Start(ctx context.Context) {
 	log.Println("Starting VPN Creator Daemon...")
+	var call *signaling.CallSession
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			d.runSession(ctx)
-			select {
-			case <-time.After(3 * time.Second):
-			case <-ctx.Done():
-				return
+		}
+
+		vkSig := signaling.NewVKSignaling(d.cookies)
+		var wsURL string
+		var joinBody []byte
+
+		if call == nil {
+			log.Println("Initiating new call session (calls.start)...")
+			var vkLink, okJoin string
+			var err error
+			wsURL, vkLink, okJoin, joinBody, err = vkSig.FetchCallURL(ctx, "2000000001")
+			if err != nil {
+				log.Printf("Failed to fetch call URL: %v", err)
+				vkSig.Close()
+				sleep(ctx, 3*time.Second)
+				continue
+			}
+			call = &signaling.CallSession{VKJoinLink: vkLink, OKJoinLink: okJoin}
+			d.setLinkInfo(vkLink)
+			log.Printf("New Call created! Active link: %s", vkLink)
+		} else {
+			log.Println("Rejoining existing call (no calls.start)...")
+			var err error
+			wsURL, joinBody, err = vkSig.RejoinConversation(ctx, call.OKJoinLink)
+			if err != nil {
+				log.Printf("Rejoin failed, will create new call next: %v", err)
+				call = nil
+				vkSig.Close()
+				sleep(ctx, 3*time.Second)
+				continue
 			}
 		}
+
+		d.runBridge(ctx, wsURL, joinBody, call)
+		vkSig.Close()
+
+		log.Println("Creator bridge ended — rejoin same call in 3s (WLB model)")
+		sleep(ctx, 3*time.Second)
 	}
 }
 
-func (d *Daemon) runSession(ctx context.Context) {
-	log.Println("Initiating new call session...")
-
-	vkSig := signaling.NewVKSignaling(d.cookies)
-	defer vkSig.Close()
-
-	wsURL, rawLink, joinBody, err := vkSig.FetchCallURL(ctx, "2000000001")
-	if err != nil {
-		log.Printf("Failed to fetch call URL: %v", err)
-		return
+func sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
 	}
-	d.setLinkInfo(rawLink)
-	log.Printf("New Call created! Active link: %s", rawLink)
+}
 
+func (d *Daemon) runBridge(ctx context.Context, wsURL string, joinBody []byte, call *signaling.CallSession) {
 	ice := webrtc.ParseICEFromJoin(joinBody)
 	sessOpts := creator.SessionOpts{
-		JoinLink:  rawLink,
+		JoinLink:  call.VKJoinLink,
 		Resources: d.resources,
 	}
 	bridge, err := creator.NewBridge(wsURL, ice, "1.1", "6", sessOpts)

@@ -34,12 +34,15 @@ type RelayBridge struct {
 	closed     atomic.Bool
 }
 
-func NewRelayBridge(tunnel DataTunnel, mode string, logFn func(string, ...interface{})) *RelayBridge {
+func NewRelayBridge(tunnel DataTunnel, mode string, readBuf int, logFn func(string, ...interface{})) *RelayBridge {
+	if readBuf <= 0 {
+		readBuf = defaultDCReadBuf
+	}
 	rb := &RelayBridge{
 		tunnel:  tunnel,
 		logFn:   logFn,
 		mode:    mode,
-		readBuf: socks.DCBufSize,
+		readBuf: readBuf,
 		ready:   make(chan struct{}),
 	}
 	if logFn == nil {

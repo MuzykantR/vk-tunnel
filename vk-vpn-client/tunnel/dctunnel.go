@@ -1,3 +1,4 @@
+// DCTunnel — SCTP DataChannel I/O with optional ChaCha20 obfuscation (whitelist-bypass model).
 package tunnel
 
 import (
@@ -10,20 +11,26 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
+const defaultDCReadBuf = 65536
+
 type DCTunnel struct {
 	dc      *webrtc.DataChannel
 	raw     datachannel.ReadWriteCloser
 	logFn   func(string, ...interface{})
 	onData  func([]byte)
 	onClose func()
+	obf     *TunnelObfuscator
 	readBuf int
 
 	recvBytes atomic.Uint64
 	sendBytes atomic.Uint64
 }
 
-func NewDCTunnel(dc *webrtc.DataChannel, readBuf int, logFn func(string, ...interface{})) *DCTunnel {
-	t := &DCTunnel{dc: dc, readBuf: readBuf, logFn: logFn}
+func NewDCTunnel(dc *webrtc.DataChannel, obf *TunnelObfuscator, readBuf int, logFn func(string, ...interface{})) *DCTunnel {
+	t := &DCTunnel{dc: dc, obf: obf, readBuf: readBuf, logFn: logFn}
+	if readBuf <= 0 {
+		t.readBuf = defaultDCReadBuf
+	}
 	if logFn == nil {
 		t.logFn = func(string, ...interface{}) {}
 	}
@@ -41,8 +48,20 @@ func NewDCTunnel(dc *webrtc.DataChannel, readBuf int, logFn func(string, ...inte
 		})
 		return t
 	}
-
 	t.raw = raw
+	go t.readLoop()
+	return t
+}
+
+// NewDCTunnelFromRaw uses an already-detached ReadWriteCloser (joiner detaches first).
+func NewDCTunnelFromRaw(dc *webrtc.DataChannel, raw datachannel.ReadWriteCloser, obf *TunnelObfuscator, readBuf int, logFn func(string, ...interface{})) *DCTunnel {
+	t := &DCTunnel{dc: dc, raw: raw, obf: obf, readBuf: readBuf, logFn: logFn}
+	if readBuf <= 0 {
+		t.readBuf = defaultDCReadBuf
+	}
+	if logFn == nil {
+		t.logFn = func(string, ...interface{}) {}
+	}
 	go t.readLoop()
 	return t
 }
@@ -64,12 +83,25 @@ func (t *DCTunnel) readLoop() {
 			continue
 		}
 		t.recvBytes.Add(uint64(n))
-		t.deliverMessage(buf[:n])
+		cp := make([]byte, n)
+		copy(cp, buf[:n])
+		t.deliverMessage(cp)
 	}
 }
 
 func (t *DCTunnel) deliverMessage(data []byte) {
-	if len(data) == 0 || t.onData == nil {
+	if len(data) == 0 {
+		return
+	}
+	if t.obf != nil {
+		pt, ok := t.obf.DecryptPayload(data)
+		if !ok {
+			t.logFn("dctunnel: decrypt failed, drop %d bytes", len(data))
+			return
+		}
+		data = pt
+	}
+	if t.onData == nil {
 		return
 	}
 	frame := make([]byte, 4+len(data))
@@ -81,12 +113,12 @@ func (t *DCTunnel) deliverMessage(data []byte) {
 func (t *DCTunnel) sendRaw(data []byte) {
 	if t.raw != nil {
 		t.sendBytes.Add(uint64(len(data)))
-		t.raw.Write(data)
+		_, _ = t.raw.Write(data)
 		return
 	}
 	if t.dc != nil && t.dc.ReadyState() == webrtc.DataChannelStateOpen {
 		t.sendBytes.Add(uint64(len(data)))
-		t.dc.Send(data)
+		_ = t.dc.Send(data)
 	}
 }
 
@@ -96,10 +128,17 @@ func (t *DCTunnel) SendData(data []byte) {
 		binary.BigEndian.PutUint32(buf[0:4], connID)
 		buf[4] = msgType
 		copy(buf[5:], payload)
-		t.sendRaw(buf)
+		wire := buf
+		if t.obf != nil {
+			wire = t.obf.EncryptPayload(buf)
+			if wire == nil {
+				return
+			}
+		}
+		t.sendRaw(wire)
 	})
 }
 
-func (t *DCTunnel) SetOnData(fn func([]byte))  { t.onData = fn }
-func (t *DCTunnel) SetOnClose(fn func())       { t.onClose = fn }
+func (t *DCTunnel) SetOnData(fn func([]byte)) { t.onData = fn }
+func (t *DCTunnel) SetOnClose(fn func())      { t.onClose = fn }
 func (t *DCTunnel) Reconfigure(fps, batch int) {}

@@ -141,6 +141,9 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 		return nil, err
 	}
 	s.dc = dc
+	if s.maxDCBuf > 0 {
+		dc.SetBufferedAmountLowThreshold(s.maxDCBuf)
+	}
 
 	dc.OnOpen(func() {
 		log.Println("[creator] tunnel DataChannel open — relay bridge active")

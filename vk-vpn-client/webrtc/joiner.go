@@ -3,7 +3,6 @@ package webrtc
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,10 +11,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
 	"github.com/vk-vpn/client/tunnel"
 )
@@ -43,18 +42,15 @@ type Joiner struct {
 	remotePeerID  *int64
 	pc            *webrtc.PeerConnection
 	dc            *webrtc.DataChannel
-	rawDC         datachannel.ReadWriteCloser // non-nil when Detach() succeeded
+	dcTunnel      *tunnel.DCTunnel
+	relay         *tunnel.RelayBridge
 	remoteSet     bool
 	pendingICE    []webrtc.ICECandidateInit
 	answerSent    bool
 	remoteIPs     map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
 	mu            sync.Mutex
-	socksConns    map[uint32]net.Conn
-	socksWriteCh  map[uint32]chan []byte // per-conn write channels — keeps dc.OnMessage non-blocking
-	connectCh     map[uint32]chan error  // signals ConnectOK/ConnectErr per conn
-	connIDSeq     uint32
-	connIDMu      sync.Mutex
 	closeOnce     sync.Once
+	iceStableReached atomic.Bool
 	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
 	iceRestartMu  sync.Mutex
 	iceRestarting bool
@@ -78,9 +74,6 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 		iceStableCh:  make(chan struct{}),
 		ctx:          childCtx,
 		cancel:       cancel,
-		socksConns:   make(map[uint32]net.Conn),
-		socksWriteCh: make(map[uint32]chan []byte),
-		connectCh:    make(map[uint32]chan error),
 		remoteIPs:    make(map[string]bool),
 	}
 	if auth != nil && auth.JoinLink != "" {
@@ -299,14 +292,7 @@ func (j *Joiner) connectSFU() {
 	j.readLoop()
 }
 
-// DC framed protocol constants (compatible with whitelist-bypass)
-const (
-	msgConnect    byte = 0x01
-	msgConnectOK  byte = 0x02
-	msgConnectErr byte = 0x03
-	msgData       byte = 0x04
-	msgClose      byte = 0x05
-)
+const dcBufferedLowThreshold = 8 * 1024 * 1024 // whitelist-bypass unlimited max-dc-buf
 
 func (j *Joiner) initPC() {
 	if j.pc != nil {
@@ -366,9 +352,20 @@ func (j *Joiner) initPC() {
 			// safe to install the 0.0.0.0/1 default route.
 			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
-			go j.handleICEDisconnect()
+			// Transient disconnect during first ICE handshake is normal (connected→
+			// disconnected before routes settle). WLB does not ICE-restart here; we only
+			// restart after the tunnel was stable at least once.
+			if j.iceStableReached.Load() {
+				go j.handleICEDisconnect()
+			} else {
+				log.Println("ICE disconnected during handshake — waiting for recovery (no restart)")
+			}
 		case webrtc.ICEConnectionStateFailed:
-			go j.handleICEFailed()
+			if j.iceStableReached.Load() {
+				go j.handleICEFailed()
+			} else {
+				log.Println("ICE failed during handshake — waiting for recovery (no restart)")
+			}
 		}
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
@@ -407,21 +404,26 @@ func (j *Joiner) initPC() {
 	j.dc = dc
 	dc.OnOpen(func() {
 		log.Println("VPN tunnel DataChannel open")
-		// Detach the DC: read on our own goroutine so pion's SCTP reader
-		// is never blocked by our message handler. This is the same model
-		// whitelist-bypass uses and sustains 15 Mbps with it.
+		dc.SetBufferedAmountLowThreshold(dcBufferedLowThreshold)
+
 		raw, err := dc.Detach()
 		if err != nil {
-			log.Printf("Joiner: dc.Detach failed (falling back to OnMessage): %v", err)
-			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				j.handleDCMessage(msg.Data)
-			})
+			log.Printf("Joiner: dc.Detach failed: %v", err)
+			j.dcTunnel = tunnel.NewDCTunnel(dc, j.obf, 0, log.Printf)
 		} else {
-			j.rawDC = raw
-			go j.dcReadLoop()
+			j.dcTunnel = tunnel.NewDCTunnelFromRaw(dc, raw, j.obf, 0, log.Printf)
 		}
+		j.relay = tunnel.NewRelayBridge(j.dcTunnel, "joiner", 0, log.Printf)
+		j.relay.MarkReady()
 		j.readyOnce.Do(func() { close(j.readyCh) })
-		go j.listenSOCKS()
+
+		addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
+		go func() {
+			log.Printf("SOCKS5 via RelayBridge on %s", addr)
+			if err := j.relay.ListenSOCKS(addr); err != nil {
+				log.Printf("RelayBridge SOCKS stopped: %v", err)
+			}
+		}()
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -433,284 +435,7 @@ func (j *Joiner) initPC() {
 	log.Println("Joiner: PC ready, waiting for offer")
 }
 
-// ---------- DC Relay (joiner side) ----------
-
-// dcReadLoop reads framed messages off the detached DataChannel and dispatches
-// them to handleDCMessage. Runs in its own goroutine, owned by the joiner.
-func (j *Joiner) dcReadLoop() {
-	// 64 KB is the maximum message size SCTP will deliver to us; sized to
-	// match max-dc-buf / chunk semantics used by whitelist-bypass.
-	buf := make([]byte, 64*1024)
-	for {
-		n, isString, err := j.rawDC.ReadDataChannel(buf)
-		if err != nil {
-			log.Printf("Joiner: dc read loop exiting: %v", err)
-			return
-		}
-		if isString || n == 0 {
-			continue
-		}
-		cp := make([]byte, n)
-		copy(cp, buf[:n])
-		j.handleDCMessage(cp)
-	}
-}
-
-func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
-	buf := make([]byte, 5+len(payload))
-	binary.BigEndian.PutUint32(buf[0:4], connID)
-	buf[4] = mt
-	copy(buf[5:], payload)
-	wire := buf
-	if j.obf != nil {
-		wire = j.obf.EncryptPayload(buf)
-		if wire == nil {
-			return
-		}
-	}
-	if j.rawDC != nil {
-		// Raw write — bypasses pion's OnMessage scheduling and produces
-		// far less goroutine churn than dc.Send under sustained load.
-		if _, err := j.rawDC.Write(wire); err != nil {
-			// rawDC.Write only errors when the DC is gone; nothing useful
-			// to do here besides drop the frame — TCP will retransmit.
-		}
-		return
-	}
-	if j.dc != nil {
-		j.dc.Send(wire)
-	}
-}
-
-func (j *Joiner) handleDCMessage(data []byte) {
-	if j.obf != nil {
-		pt, ok := j.obf.DecryptPayload(data)
-		if !ok {
-			return
-		}
-		data = pt
-	}
-	if len(data) < 5 {
-		return
-	}
-	connID := binary.BigEndian.Uint32(data[0:4])
-	mt := data[4]
-	payload := data[5:]
-
-	switch mt {
-	case msgConnectOK:
-		log.Printf("[socks] conn %d: connect OK", connID)
-		j.mu.Lock()
-		ch := j.connectCh[connID]
-		j.mu.Unlock()
-		if ch != nil {
-			ch <- nil
-		}
-	case msgConnectErr:
-		errMsg := string(payload)
-		log.Printf("[socks] conn %d: connect error: %s", connID, errMsg)
-		j.mu.Lock()
-		ch := j.connectCh[connID]
-		j.mu.Unlock()
-		if ch != nil {
-			ch <- fmt.Errorf("%s", errMsg)
-		}
-	case msgData:
-		// Non-blocking: push into the per-connection write channel so the
-		// dc.OnMessage callback never blocks on a slow local socket.
-		// If the channel is full (local app too slow) we drop the frame — the
-		// OS TCP layer will retransmit from the remote side.
-		j.mu.Lock()
-		wch := j.socksWriteCh[connID]
-		j.mu.Unlock()
-		if wch != nil {
-			cp := make([]byte, len(payload))
-			copy(cp, payload)
-			select {
-			case wch <- cp:
-			default:
-				log.Printf("[dc-in] conn %d: write channel full, dropping %d bytes", connID, len(payload))
-			}
-		}
-	case msgClose:
-		j.mu.Lock()
-		conn := j.socksConns[connID]
-		wch := j.socksWriteCh[connID]
-		delete(j.socksConns, connID)
-		delete(j.socksWriteCh, connID)
-		j.mu.Unlock()
-		if wch != nil {
-			close(wch)
-		}
-		if conn != nil {
-			conn.Close()
-		}
-	}
-}
-
-func (j *Joiner) listenSOCKS() {
-	addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Printf("SOCKS5 listen failed: %v", err)
-		return
-	}
-	log.Printf("SOCKS5 proxy listening on %s", addr)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go j.handleSOCKS(conn)
-	}
-}
-
-func (j *Joiner) handleSOCKS(conn net.Conn) {
-	defer conn.Close()
-
-	// SOCKS5 handshake
-	buf := make([]byte, 512)
-	n, err := conn.Read(buf)
-	if err != nil || n < 2 || buf[0] != 0x05 {
-		return
-	}
-	conn.Write([]byte{0x05, 0x00}) // no auth
-
-	n, err = conn.Read(buf)
-	if err != nil || n < 7 {
-		return
-	}
-
-	cmd := buf[1]
-	if cmd == 0x03 {
-		// UDP ASSOCIATE — not supported, reply with command not supported
-		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-	if cmd != 0x01 {
-		// Not TCP CONNECT
-		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-
-	var target string
-	switch buf[3] {
-	case 0x01: // IPv4
-		if n < 10 {
-			return
-		}
-		ip := net.IP(buf[4:8])
-		port := binary.BigEndian.Uint16(buf[8:10])
-		target = fmt.Sprintf("%s:%d", ip.String(), port)
-	case 0x03: // Domain
-		domainLen := int(buf[4])
-		if n < 5+domainLen+2 {
-			return
-		}
-		domain := string(buf[5 : 5+domainLen])
-		port := binary.BigEndian.Uint16(buf[5+domainLen : 5+domainLen+2])
-		target = fmt.Sprintf("%s:%d", domain, port)
-	case 0x04: // IPv6
-		if n < 22 {
-			return
-		}
-		ip := net.IP(buf[4:20])
-		port := binary.BigEndian.Uint16(buf[20:22])
-		// Reject unroutable IPv6 (link-local, multicast, unspecified) up-front.
-		// Sending these into the tunnel always fails on the VPS and clutters
-		// the server log with `dial tcp [fe80::...]: invalid argument`.
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-			conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // host unreachable
-			return
-		}
-		target = fmt.Sprintf("[%s]:%d", ip.String(), port)
-	default:
-		return
-	}
-
-	log.Printf("[socks] new TCP CONNECT -> %s", target)
-
-	// Send CONNECT to creator via DC and WAIT for ConnectOK
-	j.connIDMu.Lock()
-	j.connIDSeq++
-	connID := j.connIDSeq
-	j.connIDMu.Unlock()
-
-	waitCh := make(chan error, 1)
-	// writeCh buffers server→client data frames so dc.OnMessage never blocks
-	// on conn.Write() under load (e.g. during a speedtest download).
-	writeCh := make(chan []byte, 512)
-	j.mu.Lock()
-	j.socksConns[connID] = conn
-	j.socksWriteCh[connID] = writeCh
-	j.connectCh[connID] = waitCh
-	j.mu.Unlock()
-
-	j.sendDCFrame(connID, msgConnect, []byte(target))
-
-	// Wait for server to dial the target (ConnectOK or ConnectErr)
-	select {
-	case err := <-waitCh:
-		j.mu.Lock()
-		delete(j.connectCh, connID)
-		j.mu.Unlock()
-		if err != nil {
-			log.Printf("[socks] conn %d: server connect failed: %v", connID, err)
-			conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // connection refused
-			j.mu.Lock()
-			delete(j.socksConns, connID)
-			delete(j.socksWriteCh, connID)
-			j.mu.Unlock()
-			close(writeCh)
-			return
-		}
-	case <-time.After(30 * time.Second):
-		log.Printf("[socks] conn %d: connect timeout", connID)
-		conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // host unreachable
-		j.mu.Lock()
-		delete(j.socksConns, connID)
-		delete(j.socksWriteCh, connID)
-		delete(j.connectCh, connID)
-		j.mu.Unlock()
-		close(writeCh)
-		return
-	}
-
-	// NOW reply success — server has confirmed the connection
-	log.Printf("[socks] conn %d: sending SOCKS5 success", connID)
-	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-
-	// Writer goroutine: drains writeCh → local SOCKS connection.
-	// This decouples the dc.OnMessage callback from potentially slow conn.Write().
-	go func() {
-		for data := range writeCh {
-			if _, err := conn.Write(data); err != nil {
-				break
-			}
-		}
-	}()
-
-	// Read from local conn -> send to DC
-	rbuf := make([]byte, 32768)
-	for {
-		n, err := conn.Read(rbuf)
-		if n > 0 {
-			j.sendDCFrame(connID, msgData, rbuf[:n])
-		}
-		if err != nil {
-			break
-		}
-	}
-	j.sendDCFrame(connID, msgClose, nil)
-	j.mu.Lock()
-	delete(j.socksConns, connID)
-	wch := j.socksWriteCh[connID]
-	delete(j.socksWriteCh, connID)
-	j.mu.Unlock()
-	if wch != nil {
-		close(wch)
-	}
-}
+// SOCKS/DC relay is handled by tunnel.RelayBridge + tunnel.DCTunnel (whitelist-bypass).
 
 func (j *Joiner) onRegisteredPeer(pid int64) {
 	j.remotePeerID = &pid
@@ -931,24 +656,8 @@ func (j *Joiner) Close() {
 			j.cancel()
 		}
 
-		// Close every active SOCKS conn so handleSOCKS goroutines exit immediately.
-		j.mu.Lock()
-		for id, conn := range j.socksConns {
-			conn.Close()
-			delete(j.socksConns, id)
-		}
-		for id, ch := range j.connectCh {
-			close(ch)
-			delete(j.connectCh, id)
-		}
-		for id, wch := range j.socksWriteCh {
-			close(wch)
-			delete(j.socksWriteCh, id)
-		}
-		j.mu.Unlock()
-
-		if j.rawDC != nil {
-			j.rawDC.Close()
+		if j.relay != nil {
+			j.relay.Close()
 		}
 		if j.dc != nil {
 			j.dc.Close()
@@ -983,6 +692,7 @@ func (j *Joiner) maybeMarkICEStable() {
 		return
 	}
 	j.iceStableOnce.Do(func() {
+		j.iceStableReached.Store(true)
 		log.Println("ICE stable for 1s — keepalive flow established")
 		close(j.iceStableCh)
 	})
