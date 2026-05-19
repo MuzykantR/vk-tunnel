@@ -139,6 +139,15 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
+	// Short pause: let the ICE agent send at least one successful STUN keepalive
+	// on the stable routing table before we add the 0.0.0.0/1 default route.
+	// Without this, the route table change arrives mid-keepalive cycle and pion's
+	// 5-second consent timer fires → one transient ICE disconnect right after connect.
+	// 2 seconds is enough for pion to complete one full keepalive round-trip (~500ms)
+	// and enter a stable ICE "completed" state.
+	log.Println("Waiting for ICE to stabilize before redirecting default traffic...")
+	time.Sleep(2 * time.Second)
+
 	log.Println("Redirecting default traffic through tunnel...")
 	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
 		a.partialTeardown()

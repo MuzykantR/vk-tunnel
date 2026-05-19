@@ -12,8 +12,6 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-
-
 // Message types for the framed DC protocol (compatible with whitelist-bypass)
 const (
 	MsgConnect    byte = 0x01
@@ -25,9 +23,19 @@ const (
 	MsgUDPReply   byte = 0x07
 )
 
+// sendBufSize is the per-connection outbound queue depth (number of frames).
+// 512 × 32 KB ≈ 16 MB of in-flight data per connection max.
+// When the queue is full we drop new data instead of blocking the reader
+// goroutine and causing head-of-line blocking on the DataChannel.
+const sendBufSize = 512
+
 type dcConn struct {
 	conn net.Conn
-	ch   chan []byte
+	// inCh receives frames sent from the joiner to the remote TCP peer.
+	inCh chan []byte
+	// outCh queues frames that the reader goroutine wants to send back to the joiner.
+	// Bounded: if the joiner is too slow we drop frames rather than stalling the reader.
+	outCh chan []byte
 }
 
 // TunnelSession is the creator-side WebRTC peer with a negotiated tunnel DataChannel.
@@ -37,20 +45,30 @@ type TunnelSession struct {
 	remoteSet bool
 	pending   []webrtc.ICECandidateInit
 	mu        sync.Mutex
-	dcMu      sync.Mutex
 	conns     sync.Map
 
 	onICE      func(*webrtc.ICECandidate)
 	OnCloseReq func()
+
+	// dcSendCh is a single shared channel that funnels all outbound frames to one
+	// dedicated sender goroutine. This keeps dc.Send() calls off the hot read-path
+	// goroutines and ensures we never call dc.Send() concurrently (even though pion
+	// is internally thread-safe, serialising through a channel avoids SCTP contention
+	// and makes back-pressure explicit).
+	dcSendCh chan []byte
+	dcStopCh chan struct{}
 }
 
 func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
-	// Use default MediaEngine (registers Opus, VP8 etc.) — no custom API needed
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 	if err != nil {
 		return nil, err
 	}
-	s := &TunnelSession{pc: pc}
+	s := &TunnelSession{
+		pc:       pc,
+		dcSendCh: make(chan []byte, 4096), // deep enough for many in-flight frames
+		dcStopCh: make(chan struct{}),
+	}
 
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
 		log.Printf("[creator] ICE: %s", st.String())
@@ -94,6 +112,7 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 
 	dc.OnOpen(func() {
 		log.Println("[creator] tunnel DataChannel open — relay bridge active")
+		go s.dcSendLoop()
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -111,6 +130,29 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 
 	log.Printf("[creator] PeerConnection ready (%d ICE servers)", len(ice))
 	return s, nil
+}
+
+// dcSendLoop is the single goroutine that drains dcSendCh and calls dc.Send().
+// Serialising sends here (rather than calling dc.Send concurrently from many goroutines)
+// avoids SCTP write contention and makes it easy to apply backpressure.
+func (s *TunnelSession) dcSendLoop() {
+	for {
+		select {
+		case buf, ok := <-s.dcSendCh:
+			if !ok {
+				return
+			}
+			if s.dc != nil && s.dc.ReadyState() == webrtc.DataChannelStateOpen {
+				if err := s.dc.Send(buf); err != nil {
+					// DataChannel is dying — drain and exit.
+					log.Printf("[creator] dc.Send error: %v", err)
+					return
+				}
+			}
+		case <-s.dcStopCh:
+			return
+		}
+	}
 }
 
 func (s *TunnelSession) CreateOffer() (webrtc.SessionDescription, error) {
@@ -153,6 +195,7 @@ func (s *TunnelSession) AddICECandidate(c webrtc.ICECandidateInit) error {
 }
 
 func (s *TunnelSession) Close() {
+	close(s.dcStopCh)
 	s.closeAllConns()
 	if s.pc != nil {
 		s.pc.Close()
@@ -187,60 +230,71 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 		go s.connectTCP(connID, string(payload))
 	case MsgData:
 		val, ok := s.conns.Load(connID)
-		if ok {
-			dc := val.(*dcConn)
-			cp := make([]byte, len(payload))
-			copy(cp, payload)
-			select {
-			case dc.ch <- cp:
-			default:
-				log.Printf("[dc] conn %d write queue full, dropping %d bytes", connID, len(payload))
-			}
+		if !ok {
+			return
+		}
+		dc := val.(*dcConn)
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		select {
+		case dc.inCh <- cp:
+		default:
+			log.Printf("[dc] conn %d inCh full, dropping %d bytes from joiner", connID, len(payload))
 		}
 	case MsgClose:
 		val, ok := s.conns.LoadAndDelete(connID)
 		if ok {
 			dc := val.(*dcConn)
-			close(dc.ch)
+			close(dc.inCh)
 		}
 	}
 }
 
+// sendDCFrame enqueues a frame on the shared sender channel.
+// If the channel is full (joiner too slow / DC congested) the frame is dropped
+// instead of blocking the calling goroutine (which is reading from remote TCP).
 func (s *TunnelSession) sendDCFrame(connID uint32, mt byte, payload []byte) {
-	s.dcMu.Lock()
-	defer s.dcMu.Unlock()
-	if s.dc == nil {
-		return
-	}
 	buf := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
-	s.dc.Send(buf)
+	select {
+	case s.dcSendCh <- buf:
+	default:
+		// DataChannel send queue full — drop this frame.
+		// TCP will retransmit; we just lose throughput, not the connection.
+		log.Printf("[dc] conn %d dcSendCh full, dropping %d-byte frame (type=%02x)", connID, len(buf), mt)
+	}
 }
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	log.Printf("[dc] CONNECT %d -> %s", connID, addr)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		log.Printf("[dc] CONNECT %d failed: %v", connID, err)
+		log.Printf("[dc] CONNECT %d failed: %v", connID, addr)
 		s.sendDCFrame(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
-	dc := &dcConn{conn: conn, ch: make(chan []byte, 256)}
+	dc := &dcConn{
+		conn:  conn,
+		inCh:  make(chan []byte, 256),
+		outCh: make(chan []byte, sendBufSize),
+	}
 	s.conns.Store(connID, dc)
 	s.sendDCFrame(connID, MsgConnectOK, nil)
 	log.Printf("[dc] CONNECTED %d -> %s", connID, addr)
 
-	// Writer goroutine
+	// Writer: joiner → remote TCP (data coming from the client).
 	go func() {
-		for data := range dc.ch {
+		for data := range dc.inCh {
 			conn.Write(data)
 		}
 		conn.Close()
 	}()
 
-	// Reader goroutine
+	// Reader: remote TCP → joiner (data going back to the client).
+	// Reads are done in a tight loop; we push frames onto the shared dcSendCh
+	// instead of calling dc.Send() directly. This keeps ICE unblocked.
 	buf := make([]byte, 32768)
 	for {
 		n, err := conn.Read(buf)

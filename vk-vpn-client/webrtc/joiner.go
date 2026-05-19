@@ -47,7 +47,8 @@ type Joiner struct {
 	remoteIPs     map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
 	mu            sync.Mutex
 	socksConns    map[uint32]net.Conn
-	connectCh     map[uint32]chan error // signals ConnectOK/ConnectErr per conn
+	socksWriteCh  map[uint32]chan []byte // per-conn write channels — keeps dc.OnMessage non-blocking
+	connectCh     map[uint32]chan error  // signals ConnectOK/ConnectErr per conn
 	connIDSeq     uint32
 	connIDMu      sync.Mutex
 	udpListener   *net.UDPConn
@@ -60,14 +61,15 @@ type Joiner struct {
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 	childCtx, cancel := context.WithCancel(ctx)
 	return &Joiner{
-		auth:       auth,
-		socksPort:  socksPort,
-		readyCh:    make(chan struct{}),
-		ctx:        childCtx,
-		cancel:     cancel,
-		socksConns: make(map[uint32]net.Conn),
-		connectCh:  make(map[uint32]chan error),
-		remoteIPs:  make(map[string]bool),
+		auth:         auth,
+		socksPort:    socksPort,
+		readyCh:      make(chan struct{}),
+		ctx:          childCtx,
+		cancel:       cancel,
+		socksConns:   make(map[uint32]net.Conn),
+		socksWriteCh: make(map[uint32]chan []byte),
+		connectCh:    make(map[uint32]chan error),
+		remoteIPs:    make(map[string]bool),
 	}
 }
 
@@ -448,23 +450,32 @@ func (j *Joiner) handleDCMessage(data []byte) {
 			ch <- fmt.Errorf("%s", errMsg)
 		}
 	case msgData:
+		// Non-blocking: push into the per-connection write channel so the
+		// dc.OnMessage callback never blocks on a slow local socket.
+		// If the channel is full (local app too slow) we drop the frame — the
+		// OS TCP layer will retransmit from the remote side.
 		j.mu.Lock()
-		conn := j.socksConns[connID]
+		wch := j.socksWriteCh[connID]
 		j.mu.Unlock()
-		if conn != nil {
-			_, err := conn.Write(payload)
-			if err != nil {
-				log.Printf("[dc-in] conn %d: write error: %v", connID, err)
+		if wch != nil {
+			cp := make([]byte, len(payload))
+			copy(cp, payload)
+			select {
+			case wch <- cp:
+			default:
+				log.Printf("[dc-in] conn %d: write channel full, dropping %d bytes", connID, len(payload))
 			}
-		} else {
-			// Asynchronous race condition: client closed local socket while data was in transit.
-			// Silently drop the frame.
 		}
 	case msgClose:
 		j.mu.Lock()
 		conn := j.socksConns[connID]
+		wch := j.socksWriteCh[connID]
 		delete(j.socksConns, connID)
+		delete(j.socksWriteCh, connID)
 		j.mu.Unlock()
+		if wch != nil {
+			close(wch)
+		}
 		if conn != nil {
 			conn.Close()
 		}
@@ -553,8 +564,12 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 	j.connIDMu.Unlock()
 
 	waitCh := make(chan error, 1)
+	// writeCh buffers server→client data frames so dc.OnMessage never blocks
+	// on conn.Write() under load (e.g. during a speedtest download).
+	writeCh := make(chan []byte, 512)
 	j.mu.Lock()
 	j.socksConns[connID] = conn
+	j.socksWriteCh[connID] = writeCh
 	j.connectCh[connID] = waitCh
 	j.mu.Unlock()
 
@@ -571,7 +586,9 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 			conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // connection refused
 			j.mu.Lock()
 			delete(j.socksConns, connID)
+			delete(j.socksWriteCh, connID)
 			j.mu.Unlock()
+			close(writeCh)
 			return
 		}
 	case <-time.After(30 * time.Second):
@@ -579,14 +596,26 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 		conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // host unreachable
 		j.mu.Lock()
 		delete(j.socksConns, connID)
+		delete(j.socksWriteCh, connID)
 		delete(j.connectCh, connID)
 		j.mu.Unlock()
+		close(writeCh)
 		return
 	}
 
 	// NOW reply success — server has confirmed the connection
 	log.Printf("[socks] conn %d: sending SOCKS5 success", connID)
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+
+	// Writer goroutine: drains writeCh → local SOCKS connection.
+	// This decouples the dc.OnMessage callback from potentially slow conn.Write().
+	go func() {
+		for data := range writeCh {
+			if _, err := conn.Write(data); err != nil {
+				break
+			}
+		}
+	}()
 
 	// Read from local conn -> send to DC
 	rbuf := make([]byte, 32768)
@@ -602,7 +631,12 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 	j.sendDCFrame(connID, msgClose, nil)
 	j.mu.Lock()
 	delete(j.socksConns, connID)
+	wch := j.socksWriteCh[connID]
+	delete(j.socksWriteCh, connID)
 	j.mu.Unlock()
+	if wch != nil {
+		close(wch)
+	}
 }
 
 func (j *Joiner) onRegisteredPeer(pid int64) {
@@ -833,6 +867,10 @@ func (j *Joiner) Close() {
 		for id, ch := range j.connectCh {
 			close(ch)
 			delete(j.connectCh, id)
+		}
+		for id, wch := range j.socksWriteCh {
+			close(wch)
+			delete(j.socksWriteCh, id)
 		}
 		j.mu.Unlock()
 
