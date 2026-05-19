@@ -1,14 +1,20 @@
 package wintun
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const tunnelPeer = "10.8.0.1" // on-link next-hop (wintun is point-to-point, no ARP needed)
+
+// addedRoutes tracks every bypass route we installed so Disconnect can remove all of them.
+// Key format: "ip/mask" (e.g. "1.2.3.4/32", "87.240.128.0/18"). Value: gateway used.
+var addedRoutes sync.Map
 
 // ConfigureInterface assigns an IP to the TUN adapter via netsh (no gateway).
 func ConfigureInterface(adapterName string, ip string, mask string) error {
@@ -85,7 +91,6 @@ func SetupRoutingLoopBypass(defaultGateway string, extraBypassIPs []string) erro
 			}
 			continue
 		}
-		// It's a hostname (e.g. videowebrtc.okcdn.ru)! Resolve it to IPv4!
 		log.Printf("Resolving dynamic bypass hostname: %s", item)
 		ips, err := net.LookupIP(item)
 		if err != nil {
@@ -100,7 +105,6 @@ func SetupRoutingLoopBypass(defaultGateway string, extraBypassIPs []string) erro
 		}
 	}
 
-	// Add VK IP subnets bypass routes
 	vkSubnets := []string{
 		"87.240.128.0/18",
 		"93.186.224.0/20",
@@ -137,7 +141,8 @@ func RedirectDefaultTraffic(adapterName string) error {
 	return nil
 }
 
-// CleanupRouting removes split default routes.
+// CleanupRouting removes split default routes AND every bypass route that was installed
+// during this session. Critical for preventing stale state between VPN restarts.
 func CleanupRouting(adapterName string) {
 	log.Println("Cleaning up routing tables...")
 	if adapterName == "" {
@@ -147,6 +152,68 @@ func CleanupRouting(adapterName string) {
 		runNetsh("interface", "ipv4", "delete", "route",
 			"prefix="+prefix, "interface="+adapterName)
 	}
+	DeleteAllBypassRoutes()
+}
+
+// DeleteAllBypassRoutes removes every /32 host route and every subnet route registered in addedRoutes.
+// Idempotent — safe to call multiple times.
+func DeleteAllBypassRoutes() {
+	count := 0
+	addedRoutes.Range(func(k, _ any) bool {
+		key := k.(string)
+		parts := strings.Split(key, "/")
+		if len(parts) != 2 {
+			addedRoutes.Delete(k)
+			return true
+		}
+		ip := parts[0]
+		ones, err := strconv.Atoi(parts[1])
+		if err != nil {
+			addedRoutes.Delete(k)
+			return true
+		}
+		var maskStr string
+		if ones == 32 {
+			maskStr = "255.255.255.255"
+		} else {
+			maskStr = net.IP(net.CIDRMask(ones, 32)).String()
+		}
+		_ = exec.Command("route", "DELETE", ip, "MASK", maskStr).Run()
+		addedRoutes.Delete(k)
+		count++
+		return true
+	})
+	if count > 0 {
+		log.Printf("Removed %d bypass routes", count)
+	}
+}
+
+// RemoveAdapter forcefully removes a network adapter using a 3-tier fallback:
+//
+//  1. PowerShell Remove-NetAdapter (best, requires NetAdapter cmdlet)
+//  2. netsh interface delete interface
+//  3. pnputil unregister wintun root device (extreme: removes ALL stale Wintun instances)
+//
+// Idempotent. Logs whichever path succeeded.
+func RemoveAdapter(name string) {
+	if name == "" {
+		return
+	}
+	log.Printf("Force-removing adapter: %s", name)
+
+	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf(`if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { Get-NetAdapter -Name '%s' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false; Write-Output 'OK' }`, name)).CombinedOutput()
+	if err == nil && strings.Contains(string(out), "OK") {
+		log.Printf("Removed %s via PowerShell", name)
+		return
+	}
+
+	if cmdErr := exec.Command("netsh", "interface", "delete", "interface", "name="+name).Run(); cmdErr == nil {
+		log.Printf("Removed %s via netsh", name)
+		return
+	}
+
+	log.Printf("Adapter %s removal: PowerShell+netsh both failed (output: %s)", name, strings.TrimSpace(string(out)))
 }
 
 // --- Low-level helpers (matching whitelist-bypass routes_windows.go) ---
@@ -163,7 +230,7 @@ func addRouteViaAdapter(prefix, adapter, nexthop string, metric int) error {
 // AddBypassRoute adds a /32 bypass route for ip via gateway (exported for main.go).
 func AddBypassRoute(ip, gateway string) {
 	if err := addHostRoute(ip, gateway); err != nil {
-		log.Printf("DNS bypass route for %s failed: %v", ip, err)
+		log.Printf("Bypass route for %s failed: %v", ip, err)
 	}
 }
 
@@ -185,16 +252,17 @@ func AddBypassSubnet(cidr, gateway string) {
 	cmd := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway, "METRIC", "1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// retry without METRIC
 		cmd2 := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway)
 		out, err = cmd2.CombinedOutput()
 		if err != nil {
 			log.Printf("route ADD subnet %s failed: %s", cidr, strings.TrimSpace(string(out)))
+			return
 		}
 	}
+	addedRoutes.Store(cidr, gateway)
 }
 
-// addHostRoute installs a /32 bypass route with metric 1 (highest priority).
+// addHostRoute installs a /32 bypass route with metric 1 (highest priority) and registers it for cleanup.
 func addHostRoute(ip, gateway string) error {
 	if ip == gateway {
 		return nil
@@ -202,14 +270,21 @@ func addHostRoute(ip, gateway string) error {
 	cmd := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway, "METRIC", "1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// retry without METRIC
 		cmd2 := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway)
 		out, err = cmd2.CombinedOutput()
 		if err != nil {
-			log.Printf("route ADD %s failed: %s", ip, strings.TrimSpace(string(out)))
+			outStr := strings.TrimSpace(string(out))
+			// "The object already exists" — treat as success, register for cleanup
+			if strings.Contains(strings.ToLower(outStr), "already exists") {
+				addedRoutes.Store(ip+"/32", gateway)
+				return nil
+			}
+			log.Printf("route ADD %s failed: %s", ip, outStr)
+			return err
 		}
 	}
-	return err
+	addedRoutes.Store(ip+"/32", gateway)
+	return nil
 }
 
 // runNetsh executes netsh with the given args.
@@ -223,15 +298,18 @@ func runNetsh(args ...string) ([]byte, error) {
 }
 
 // CleanupAllStaleState performs a deep network cleanup to mimic the "reboot effect".
-// It flushes old WLVPN routing configurations, bypass subnets, and removes stale virtual adapters.
+// Called at the start of every Connect() to ensure a clean slate.
 func CleanupAllStaleState(defaultGateway string) {
 	log.Println("Performing deep network cleanup (the 'reboot effect')...")
 
-	// 1. Delete split routes (ignore errors if not present)
+	// 1. Delete any tracked bypass routes from a previous session that we forgot to clean.
+	DeleteAllBypassRoutes()
+
+	// 2. Delete split default routes (in case Disconnect didn't run, e.g. after crash)
 	exec.Command("route", "DELETE", "0.0.0.0", "MASK", "128.0.0.0").Run()
 	exec.Command("route", "DELETE", "128.0.0.0", "MASK", "128.0.0.0").Run()
 
-	// 2. Delete all possible VK / STUN / TURN bypass subnets
+	// 3. Delete known stale subnet routes from previous sessions that we don't currently track.
 	vkSubnets := []string{
 		"87.240.128.0/18",
 		"93.186.224.0/20",
@@ -254,31 +332,18 @@ func CleanupAllStaleState(defaultGateway string) {
 		}
 	}
 
-	// 3. Delete DNS bypasses
+	// 4. Delete DNS bypass routes from previous sessions
 	for _, dns := range []string{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"} {
 		exec.Command("route", "DELETE", dns, "MASK", "255.255.255.255").Run()
 	}
 
-	// 4. Delete bypassed default gateway route
+	// 5. Delete bypass route for default gateway (if it was added)
 	if defaultGateway != "" {
 		exec.Command("route", "DELETE", defaultGateway, "MASK", "255.255.255.255").Run()
 	}
 
-	// 5. Clean up any stale WLVPN adapters using powershell, falling back to netsh
-	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		`if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { Invoke-Expression 'Get-NetAdapter | Where-Object { $_.Name -like ''*WLVPN*'' } | Remove-NetAdapter -Confirm:$false' } else { Write-Error "NetAdapter module not available" }`)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		log.Println("Cleaned up stale WLVPN adapters.")
-	} else {
-		exec.Command("netsh", "interface", "delete", "interface", "name=WLVPN").Run()
-		outStr := strings.TrimSpace(string(out))
-		if strings.Contains(outStr, "NetAdapter module not available") {
-			log.Println("NetAdapter module not available, using netsh fallback for adapter cleanup.")
-		} else {
-			log.Printf("Stale adapter cleanup output (PS failed, fallback to netsh executed): %s", outStr)
-		}
-	}
+	// 6. Force-remove WLVPN adapter. Idempotent — safe if it doesn't exist.
+	RemoveAdapter("WLVPN")
 
 	log.Println("Network cleanup completed successfully.")
 }

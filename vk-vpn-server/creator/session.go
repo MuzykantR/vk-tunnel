@@ -163,6 +163,15 @@ func (s *TunnelSession) SetOnICE(fn func(*webrtc.ICECandidate)) {
 	s.onICE = fn
 }
 
+// SignalingState reports the current pion signaling state so callers can
+// distinguish between "ready to accept new offer" and "renegotiation in flight".
+func (s *TunnelSession) SignalingState() webrtc.SignalingState {
+	if s.pc == nil {
+		return webrtc.SignalingStateClosed
+	}
+	return s.pc.SignalingState()
+}
+
 // ---------- DC Relay (framed protocol, compatible with whitelist-bypass) ----------
 
 func (s *TunnelSession) handleDCMessage(data []byte) {

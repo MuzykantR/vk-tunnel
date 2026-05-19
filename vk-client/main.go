@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -14,96 +17,180 @@ import (
 
 	"vk-client/tun2socks"
 	"vk-client/wintun"
+
 	clientAPI "github.com/vk-vpn/client/api"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// App struct holds the application state.
+const (
+	adapterName = "WLVPN"
+	tunnelIP    = "10.8.0.2"
+	tunnelMask  = "255.255.255.0"
+	socksPort   = 1080
+)
+
+// App owns the lifecycle of a single VPN connection. All Connect/Disconnect
+// transitions are mutually exclusive (mu).
 type App struct {
-	tunEngine *tun2socks.Engine
-	defaultGW string
-	wintunIP  string
+	mu         sync.Mutex
+	tunEngine  *tun2socks.Engine
+	defaultGW  string
+	tunName    string
+	connected  bool
+	bypassSink func(string) // callback shared with joiner; closed at Disconnect
 }
 
 func NewApp() *App {
-	return &App{
-		defaultGW: wintun.DefaultGateway(),
-		wintunIP:  "10.8.0.2",
-	}
+	return &App{}
 }
 
-// Connect is called from the JS frontend when the user clicks "Connect".
+// Connect runs the full VPN bring-up. The order is deliberate and is the
+// fix for the ICE-disconnect-during-route-ADD bug:
+//
+//   1. Forcefully kill any leftover WLVPN adapter / stale routes from the
+//      previous session ("reboot effect" without an actual reboot).
+//   2. Read the physical default gateway AFTER the cleanup so we never grab
+//      10.8.0.1 from a stale WLVPN.
+//   3. Resolve the VK session over the clean network (HTTP, captcha browser
+//      window). This produces TURN/STUN IPs that must be bypassed.
+//   4. Bring up tun2socks (creates the WLVPN adapter) and install ALL known
+//      bypass /32 routes BEFORE WebRTC begins. The routing table is stable
+//      before pion sends its first STUN binding.
+//   5. Start the joiner. For every new remote ICE candidate, the callback
+//      installs a /32 bypass synchronously — so VPS public IP is bypassed
+//      the moment its candidate arrives, not 6 seconds later.
+//   6. Once the DataChannel is open, redirect the default route to WLVPN.
+//      All earlier bypass /32s have METRIC 1 and beat the new 0.0.0.0/1.
 func (a *App) Connect(uri string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.connected {
+		return nil
+	}
+
 	log.Printf("Connecting to VPN via URI: %s", uri)
 
-	// 0. Perform deep network cleanup to mimic the "reboot effect"
-	wintun.CleanupAllStaleState(a.defaultGW)
+	wintun.RemoveAdapter(adapterName)
+	wintun.CleanupAllStaleState("")
 
-	// 1. Start WebRTC client — establishes ICE + DC + SOCKS5 listener
-	log.Println("Starting VPN Core Client...")
-	bypassIPs, err := clientAPI.StartClient(uri, 1080)
+	a.defaultGW = wintun.DefaultGateway()
+	if a.defaultGW == "" || strings.HasPrefix(a.defaultGW, "10.8.0.") {
+		return fmt.Errorf("failed to detect physical default gateway (got %q)", a.defaultGW)
+	}
+	log.Printf("Physical default gateway: %s", a.defaultGW)
+
+	log.Println("Resolving VK session over clean network...")
+	auth, knownBypassIPs, err := clientAPI.ResolveSession(uri)
 	if err != nil {
 		return err
 	}
+	log.Printf("Session resolved; %d known bypass IPs from TURN/STUN/API", len(knownBypassIPs))
 
-	// 2. Start tun2socks (creates its own Wintun adapter)
 	log.Println("Starting tun2socks engine...")
-	tunEngine, err := tun2socks.MustStart("WLVPN", "127.0.0.1:1080")
+	tunEngine, err := tun2socks.MustStart(adapterName, "127.0.0.1:1080")
 	if err != nil {
 		return err
 	}
 	a.tunEngine = tunEngine
 
-	// 3. Wait for adapter, configure IP (no DNS on TUN — our SOCKS5 lacks UDP relay)
 	time.Sleep(1 * time.Second)
 	tunName := wintun.FindTunAdapter()
 	if tunName == "" {
-		tunName = "WLVPN"
+		tunName = adapterName
 	}
+	a.tunName = tunName
 	log.Printf("Using TUN adapter: %s", tunName)
-	if err := wintun.ConfigureInterface(tunName, a.wintunIP, "255.255.255.0"); err != nil {
+
+	if err := wintun.ConfigureInterface(tunName, tunnelIP, tunnelMask); err != nil {
+		a.partialTeardown()
 		return err
 	}
-	// Set MTU to 1400 to prevent UDP fragmentation issues over Docker/VPN networks
 	if err := wintun.SetMTU(tunName, 1400); err != nil {
 		log.Printf("Warning: failed to set MTU: %v", err)
 	}
 
-	// 4. Resolve and add bypass routes AFTER the WLVPN adapter is fully configured and settled.
-	// This prevents Windows from flushing or invalidating dynamic bypass routes during adapter creation.
-	log.Println("Setting up routing bypass for VK SFU nodes...")
-	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, bypassIPs); err != nil {
+	log.Println("Installing bypass /32 routes for all known TURN/STUN/API hosts...")
+	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, knownBypassIPs); err != nil {
+		a.partialTeardown()
 		return err
 	}
-
-	// 5. Bypass DNS servers so DNS resolves instantly (not through broken UDP tunnel)
 	for _, dns := range []string{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"} {
 		wintun.AddBypassRoute(dns, a.defaultGW)
 	}
 
-	// 6. Redirect default traffic through TUN
-	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
+	// Give NDIS ~1s to settle after the burst of route changes before pion
+	// starts the ICE agent. Cheap insurance, hard to debug if skipped.
+	time.Sleep(1 * time.Second)
+
+	onNewBypassIP := func(ip string) {
+		if ip == "" {
+			return
+		}
+		log.Printf("Dynamic bypass for new ICE IP: %s", ip)
+		wintun.AddBypassRoute(ip, a.defaultGW)
+	}
+	a.bypassSink = onNewBypassIP
+
+	log.Println("Starting VPN Core Client (ICE/DTLS/DC) on prepared routing table...")
+	if err := clientAPI.StartJoinerWithAuth(auth, socksPort, onNewBypassIP); err != nil {
+		a.partialTeardown()
 		return err
 	}
 
+	log.Println("Redirecting default traffic through tunnel...")
+	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
+		a.partialTeardown()
+		return err
+	}
+
+	a.connected = true
 	log.Println("VPN Connected Successfully!")
 	return nil
 }
 
-// Disconnect restores routing and closes adapters.
+// Disconnect tears the tunnel down in reverse-Connect order and removes EVERY
+// /32 / subnet bypass route that was installed during this session. Idempotent.
 func (a *App) Disconnect() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.connected && a.tunEngine == nil {
+		return
+	}
 	log.Println("Disconnecting VPN...")
-	wintun.CleanupRouting("WLVPN")
+
+	clientAPI.StopClient()
+
 	if a.tunEngine != nil {
 		a.tunEngine.Stop()
+		a.tunEngine = nil
 	}
+
+	wintun.CleanupRouting(a.tunName)
+	wintun.RemoveAdapter(adapterName)
+
+	a.bypassSink = nil
+	a.connected = false
 	log.Println("VPN Disconnected.")
 }
 
+// partialTeardown is the recovery path used when Connect bails out mid-way.
+// We must remove whatever we already installed before returning the error.
+func (a *App) partialTeardown() {
+	log.Println("Connect failed — running partial teardown...")
+	clientAPI.StopClient()
+	if a.tunEngine != nil {
+		a.tunEngine.Stop()
+		a.tunEngine = nil
+	}
+	wintun.CleanupRouting(a.tunName)
+	wintun.RemoveAdapter(adapterName)
+	a.bypassSink = nil
+	a.connected = false
+}
+
 func main() {
-	// Redirect logs to app.log next to the executable for easy debugging
 	exe, err := os.Executable()
 	if err == nil {
 		logFile, err := os.OpenFile(filepath.Join(filepath.Dir(exe), "app.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)

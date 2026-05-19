@@ -20,44 +20,51 @@ import (
 
 // Joiner — headless VK joiner (whitelist-bypass vk_joiner.go), DC tunnel mode.
 type Joiner struct {
-	auth       *AuthParams
-	socksPort  int
-	readyCh    chan struct{}
-	readyOnce  sync.Once
-	ctx        context.Context
+	auth      *AuthParams
+	socksPort int
+	readyCh   chan struct{}
+	readyOnce sync.Once
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	joinResp struct {
-		Endpoint   string
-		TurnURLs   []string
-		TurnUser   string
-		TurnCred   string
-		StunURLs   []string
+		Endpoint string
+		TurnURLs []string
+		TurnUser string
+		TurnCred string
+		StunURLs []string
 	}
 
-	ws           *websocket.Conn
-	vkMu         sync.Mutex
-	vkSeq        int
-	remotePeerID *int64
-	pc           *webrtc.PeerConnection
-	dc           *webrtc.DataChannel
-	remoteSet    bool
-	pendingICE   []webrtc.ICECandidateInit
-	answerSent   bool
-	remoteIPs    map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
-	mu           sync.Mutex
-	socksConns   map[uint32]net.Conn
-	connectCh    map[uint32]chan error // signals ConnectOK/ConnectErr per conn
-	connIDSeq    uint32
-	connIDMu     sync.Mutex
-	udpListener  *net.UDPConn
+	ws            *websocket.Conn
+	vkMu          sync.Mutex
+	vkSeq         int
+	remotePeerID  *int64
+	pc            *webrtc.PeerConnection
+	dc            *webrtc.DataChannel
+	remoteSet     bool
+	pendingICE    []webrtc.ICECandidateInit
+	answerSent    bool
+	remoteIPs     map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
+	mu            sync.Mutex
+	socksConns    map[uint32]net.Conn
+	connectCh     map[uint32]chan error // signals ConnectOK/ConnectErr per conn
+	connIDSeq     uint32
+	connIDMu      sync.Mutex
+	udpListener   *net.UDPConn
+	closeOnce     sync.Once
+	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
+	iceRestartMu  sync.Mutex
+	iceRestarting bool
 }
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
+	childCtx, cancel := context.WithCancel(ctx)
 	return &Joiner{
 		auth:       auth,
 		socksPort:  socksPort,
 		readyCh:    make(chan struct{}),
-		ctx:        ctx,
+		ctx:        childCtx,
+		cancel:     cancel,
 		socksConns: make(map[uint32]net.Conn),
 		connectCh:  make(map[uint32]chan error),
 		remoteIPs:  make(map[string]bool),
@@ -65,6 +72,22 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 }
 
 func (j *Joiner) Ready() <-chan struct{} { return j.readyCh }
+
+// SetOnNewBypassIP registers a callback invoked the moment a new remote ICE
+// candidate IP becomes known. The caller is expected to install a /32 bypass
+// route synchronously so the IP never traverses the tunnel. Safe to call once
+// before Run().
+func (j *Joiner) SetOnNewBypassIP(fn func(string)) {
+	j.onNewBypassIP = fn
+}
+
+// reportBypassIP fires onNewBypassIP exactly once per unique IPv4 string.
+// Called from inside ICE callbacks; non-blocking is the caller's responsibility.
+func (j *Joiner) reportBypassIP(ip string) {
+	if j.onNewBypassIP != nil {
+		j.onNewBypassIP(ip)
+	}
+}
 
 // GetBypassIPs returns all IPs that the joiner actively connects to.
 // These MUST be routed directly (not through the VPN tunnel) to prevent routing loops.
@@ -334,6 +357,12 @@ func (j *Joiner) initPC() {
 
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		log.Printf("Client ICE state: %s", s.String())
+		switch s {
+		case webrtc.ICEConnectionStateDisconnected:
+			go j.handleICEDisconnect()
+		case webrtc.ICEConnectionStateFailed:
+			go j.handleICEFailed()
+		}
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		log.Printf("Client connection state: %s", s.String())
@@ -612,6 +641,10 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 						if !j.remoteIPs[candIP] {
 							j.remoteIPs[candIP] = true
 							log.Printf("[bypass] remote ICE candidate IP: %s", candIP)
+							// Synchronously install a /32 bypass BEFORE the candidate is
+							// handed to pion. This guarantees STUN keepalives leave through
+							// the physical adapter from packet #1 — no race with route ADD.
+							j.reportBypassIP(candIP)
 						}
 					}
 				}
@@ -626,23 +659,38 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 	if sdp, ok := data["sdp"].(map[string]interface{}); ok {
 		sdpType, _ := sdp["type"].(string)
 		sdpStr, _ := sdp["sdp"].(string)
-		log.Printf("Remote SDP: %s (answerSent=%v)", sdpType, j.answerSent)
+		state := j.pc.SignalingState().String()
+		log.Printf("Remote SDP: %s (signalingState=%s, answerSent=%v)", sdpType, state, j.answerSent)
 		if sdpType == "answer" {
 			filteredSDP := j.filterAndExtractSDPCandidates(sdpStr)
-			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: filteredSDP})
+			if err := j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: filteredSDP}); err != nil {
+				log.Printf("SetRemoteDescription(answer) failed: %v", err)
+				return
+			}
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
 				j.pc.AddICECandidate(ice)
 			}
 			j.pendingICE = nil
 		} else if sdpType == "offer" {
-			// Only process the first offer — duplicate offers from server cause ICE restarts
-			if j.answerSent {
-				log.Println("Ignoring duplicate offer (answer already sent)")
+			// Accept the offer only when we are in a state that allows it:
+			//   - first offer ever (initial negotiation)
+			//   - remote-initiated ICE restart while we're in Stable
+			// Reject duplicate offers during early negotiation (some VK SFU paths
+			// retransmit the offer multiple times, which would cause ICE restarts).
+			sigState := j.pc.SignalingState()
+			if j.answerSent && sigState != webrtc.SignalingStateStable {
+				log.Println("Ignoring duplicate offer (answer already sent, not in stable)")
 				return
 			}
+			if j.answerSent && sigState == webrtc.SignalingStateStable {
+				log.Println("Remote-initiated ICE restart detected, accepting new offer")
+			}
 			filteredSDP := j.filterAndExtractSDPCandidates(sdpStr)
-			j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: filteredSDP})
+			if err := j.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: filteredSDP}); err != nil {
+				log.Printf("SetRemoteDescription(offer) failed: %v", err)
+				return
+			}
 			j.remoteSet = true
 			for _, ice := range j.pendingICE {
 				j.pc.AddICECandidate(ice)
@@ -677,8 +725,13 @@ func (j *Joiner) handleVKMessage(raw []byte) {
 		if params, ok := msg["conversationParams"].(map[string]interface{}); ok {
 			if turn, ok := params["turn"].(map[string]interface{}); ok {
 				urlsRaw, _ := turn["urls"].([]interface{})
+				seen := make(map[string]bool, len(j.joinResp.TurnURLs))
+				for _, u := range j.joinResp.TurnURLs {
+					seen[u] = true
+				}
 				for _, u := range urlsRaw {
-					if s, ok := u.(string); ok {
+					if s, ok := u.(string); ok && !seen[s] {
+						seen[s] = true
 						j.joinResp.TurnURLs = append(j.joinResp.TurnURLs, s)
 					}
 				}
@@ -761,18 +814,117 @@ func (j *Joiner) readLoop() {
 	}
 }
 
+// Close tears down the joiner exactly once — safe to call from multiple
+// goroutines and from inside ICE callbacks.
 func (j *Joiner) Close() {
-	if j.pc != nil {
-		j.pc.Close()
+	j.closeOnce.Do(func() {
+		log.Println("Joiner: closing...")
+
+		if j.cancel != nil {
+			j.cancel()
+		}
+
+		// Close every active SOCKS conn so handleSOCKS goroutines exit immediately.
+		j.mu.Lock()
+		for id, conn := range j.socksConns {
+			conn.Close()
+			delete(j.socksConns, id)
+		}
+		for id, ch := range j.connectCh {
+			close(ch)
+			delete(j.connectCh, id)
+		}
+		j.mu.Unlock()
+
+		if j.dc != nil {
+			j.dc.Close()
+		}
+		if j.pc != nil {
+			j.pc.Close()
+		}
+		if j.ws != nil {
+			j.ws.Close()
+		}
+		if j.udpListener != nil {
+			j.udpListener.Close()
+			log.Printf("[ice] Shared UDP mux closed.")
+		}
+		StopCaptchaProxy()
+		log.Println("Joiner: closed.")
+	})
+}
+
+// handleICEDisconnect waits a few seconds for pion's own recovery (it may
+// flip back to connected on its own once STUN keepalives resume). If we are
+// still in disconnected after the grace period, ask the creator side for an
+// ICE restart by issuing a renegotiation offer.
+func (j *Joiner) handleICEDisconnect() {
+	const grace = 4 * time.Second
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-j.ctx.Done():
+		return
+	case <-timer.C:
 	}
-	if j.ws != nil {
-		j.ws.Close()
+	if j.pc == nil {
+		return
 	}
-	if j.udpListener != nil {
-		j.udpListener.Close()
-		log.Printf("[ice] Shared UDP mux closed.")
+	state := j.pc.ICEConnectionState()
+	if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
+		return // recovered on its own
 	}
-	StopCaptchaProxy()
+	log.Printf("ICE still %s after %s — requesting ICE restart", state.String(), grace)
+	j.requestICERestart()
+}
+
+// handleICEFailed is the harder path: pion gave up. Try one ICE restart;
+// if that doesn't help, the daemon will eventually rotate the call.
+func (j *Joiner) handleICEFailed() {
+	log.Println("ICE state: failed — requesting ICE restart immediately")
+	j.requestICERestart()
+}
+
+// requestICERestart drives the joiner-side of an ICE restart. Because the
+// original SDP was offered by the creator (server) and answered by us, the
+// cleanest renegotiation is for us to issue a new offer with ICE-Restart=true.
+// pion's PeerConnection supports the role flip via SetLocalDescription(offer)
+// when SignalingState is stable.
+func (j *Joiner) requestICERestart() {
+	j.iceRestartMu.Lock()
+	if j.iceRestarting {
+		j.iceRestartMu.Unlock()
+		return
+	}
+	j.iceRestarting = true
+	j.iceRestartMu.Unlock()
+	defer func() {
+		j.iceRestartMu.Lock()
+		j.iceRestarting = false
+		j.iceRestartMu.Unlock()
+	}()
+
+	if j.pc == nil || j.remotePeerID == nil {
+		log.Println("ICE restart: no peer or PC, skipping")
+		return
+	}
+	if j.pc.SignalingState() != webrtc.SignalingStateStable {
+		log.Printf("ICE restart: signaling state %s != stable, skipping", j.pc.SignalingState().String())
+		return
+	}
+	offer, err := j.pc.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		log.Printf("ICE restart: CreateOffer failed: %v", err)
+		return
+	}
+	if err := j.pc.SetLocalDescription(offer); err != nil {
+		log.Printf("ICE restart: SetLocalDescription failed: %v", err)
+		return
+	}
+	j.vkSendTransmit(*j.remotePeerID, map[string]interface{}{
+		"sdp": map[string]interface{}{"type": "offer", "sdp": offer.SDP},
+	})
+	log.Println("ICE restart: sent renegotiation offer to creator")
 }
 
 // getPhysicalIP discovers the IP of the default physical adapter. It first tries doing a
@@ -929,6 +1081,7 @@ func (j *Joiner) filterAndExtractSDPCandidates(sdp string) string {
 					if !j.remoteIPs[ipStr] {
 						j.remoteIPs[ipStr] = true
 						log.Printf("[bypass] Extracted SDP remote ICE candidate IP: %s", ipStr)
+						j.reportBypassIP(ipStr)
 					}
 				}
 			}

@@ -18,30 +18,46 @@ var (
 	cancelFunc   context.CancelFunc
 )
 
-// BypassIPs are the IPs that must NOT go through the VPN tunnel (TURN relays, WS endpoints).
-func StartClient(uri string, socksPort int) (bypassIPs []string, err error) {
-	if activeJoiner != nil {
-		return nil, fmt.Errorf("client is already running")
-	}
-
+// ResolveSession parses and decrypts the URI, then performs all VK API requests
+// (token, captcha, joinConversationByLink) to produce the AuthParams needed by
+// the joiner. The returned bypassIPs cover the API base host plus all TURN/STUN
+// servers — they must be /32-routed via the physical gateway BEFORE the joiner
+// starts WebRTC. This call MUST happen before tun2socks is installed (because
+// it does HTTPS to api.vk.com and may open a browser for captcha).
+func ResolveSession(uri string) (*webrtc.AuthParams, []string, error) {
 	payload, err := parser.ParseAndDecryptURI(uri)
 	if err != nil {
-		return nil, fmt.Errorf("parse URI: %w", err)
+		return nil, nil, fmt.Errorf("parse URI: %w", err)
 	}
 	log.Printf("Successfully decrypted URI. Link: %s", payload.Link)
 
 	auth, err := webrtc.ResolveJoinLink(payload.Link)
 	if err != nil {
-		return nil, fmt.Errorf("VK auth: %w", err)
+		return nil, nil, fmt.Errorf("VK auth: %w", err)
 	}
 
-	// Collect TURN/STUN IPs that must bypass the VPN tunnel
-	bypassIPs = collectBypassIPs(auth)
+	return auth, collectBypassIPs(auth), nil
+}
+
+// StartJoinerWithAuth wires the joiner up to a callback that receives every
+// new ICE candidate IP. The caller (vk-client/main.go) installs a /32 bypass
+// route for each IP immediately, BEFORE the candidate is fed to the ICE agent,
+// so pion's STUN keepalives never traverse the tunnel.
+//
+// The joiner runs in a background goroutine. This function blocks until the
+// DataChannel is open (Ready) or the 120s timeout fires.
+func StartJoinerWithAuth(auth *webrtc.AuthParams, socksPort int, onNewBypassIP func(string)) error {
+	if activeJoiner != nil {
+		return fmt.Errorf("client is already running")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelFunc = cancel
 
 	joiner := webrtc.NewJoiner(ctx, auth, socksPort)
+	if onNewBypassIP != nil {
+		joiner.SetOnNewBypassIP(onNewBypassIP)
+	}
 	activeJoiner = joiner
 
 	go func() {
@@ -53,20 +69,38 @@ func StartClient(uri string, socksPort int) (bypassIPs []string, err error) {
 	select {
 	case <-joiner.Ready():
 		log.Println("VPN tunnel DataChannel ready")
-		// Merge live session IPs (WS endpoint, actual TURN) with initial auth IPs
-		bypassIPs = append(bypassIPs, joiner.GetBypassIPs()...)
-		return bypassIPs, nil
+		return nil
 	case <-time.After(120 * time.Second):
 		cancel()
 		activeJoiner = nil
-		return nil, fmt.Errorf("timeout waiting for tunnel DataChannel")
+		return fmt.Errorf("timeout waiting for tunnel DataChannel")
 	case <-ctx.Done():
-		return nil, fmt.Errorf("cancelled")
+		activeJoiner = nil
+		return fmt.Errorf("cancelled")
 	}
 }
 
+// StartClient is kept for backward compatibility. New code should call
+// ResolveSession + StartJoinerWithAuth so tun2socks can be installed in
+// between (which is what actually fixes the ICE-disconnect-during-route-ADD bug).
+//
+// Deprecated: prefer the two-phase API.
+func StartClient(uri string, socksPort int) (bypassIPs []string, err error) {
+	auth, ips, err := ResolveSession(uri)
+	if err != nil {
+		return nil, err
+	}
+	if err := StartJoinerWithAuth(auth, socksPort, nil); err != nil {
+		return nil, err
+	}
+	bypassIPs = ips
+	bypassIPs = append(bypassIPs, activeJoiner.GetBypassIPs()...)
+	return bypassIPs, nil
+}
+
 // collectBypassIPs extracts all IPs from TURN/STUN URLs and the API base URL
-// that must be routed directly (not through the tunnel).
+// that must be routed directly (not through the tunnel). These are the IPs
+// the joiner will use to negotiate ICE — they MUST bypass WLVPN.
 func collectBypassIPs(auth *webrtc.AuthParams) []string {
 	var ips []string
 	seen := make(map[string]bool)
@@ -76,12 +110,10 @@ func collectBypassIPs(auth *webrtc.AuthParams) []string {
 			return
 		}
 		seen[host] = true
-		// If it's already an IP, use directly
 		if net.ParseIP(host) != nil {
 			ips = append(ips, host)
 			return
 		}
-		// Resolve hostname
 		resolved, err := net.LookupIP(host)
 		if err != nil {
 			log.Printf("Warning: failed to resolve %s: %v", host, err)
@@ -95,18 +127,15 @@ func collectBypassIPs(auth *webrtc.AuthParams) []string {
 	}
 
 	extractHost := func(turnURL string) string {
-		// turn:1.2.3.4:19302 or turn:host.com:19302?transport=tcp
 		s := turnURL
 		if idx := len("turn:"); len(s) > idx && s[:idx] == "turn:" {
 			s = s[idx:]
 		} else if idx := len("stun:"); len(s) > idx && s[:idx] == "stun:" {
 			s = s[idx:]
 		}
-		// Remove ?transport=...
 		if qIdx := strings.Index(s, "?"); qIdx >= 0 {
 			s = s[:qIdx]
 		}
-		// Remove port
 		host, _, err := net.SplitHostPort(s)
 		if err != nil {
 			return s
@@ -121,9 +150,13 @@ func collectBypassIPs(auth *webrtc.AuthParams) []string {
 		add(extractHost(u))
 	}
 
-	// API base URL host (ok.ru CDN)
 	if auth.APIBaseURL != "" {
 		if parsed, err := url.Parse(auth.APIBaseURL); err == nil {
+			add(parsed.Hostname())
+		}
+	}
+	if auth.Endpoint != "" {
+		if parsed, err := url.Parse(auth.Endpoint); err == nil {
 			add(parsed.Hostname())
 		}
 	}

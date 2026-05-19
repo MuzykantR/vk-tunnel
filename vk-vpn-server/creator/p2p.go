@@ -88,17 +88,36 @@ func (p *P2PHandler) OnTransmittedData(data map[string]interface{}) {
 	if sdp, ok := data["sdp"].(map[string]interface{}); ok {
 		sdpType, _ := sdp["type"].(string)
 		sdpStr, _ := sdp["sdp"].(string)
-		log.Printf("[p2p] Remote SDP: %s", sdpType)
+		state := p.bridge.session.SignalingState().String()
+		log.Printf("[p2p] Remote SDP: %s (signalingState=%s)", sdpType, state)
 		switch sdpType {
 		case "answer":
-			_ = p.bridge.session.SetRemoteDescription(webrtc.SDPTypeAnswer, sdpStr)
+			if err := p.bridge.session.SetRemoteDescription(webrtc.SDPTypeAnswer, sdpStr); err != nil {
+				log.Printf("[p2p] SetRemoteDescription(answer) failed: %v", err)
+			}
 		case "offer":
-			_ = p.bridge.session.SetRemoteDescription(webrtc.SDPTypeOffer, sdpStr)
+			// The joiner reaches the offerer role only when it asks for an ICE
+			// restart. Reject the offer if we ourselves are still mid-negotiation.
+			sigState := p.bridge.session.SignalingState()
+			if sigState != webrtc.SignalingStateStable {
+				log.Printf("[p2p] Ignoring offer — signaling state %s != stable", sigState.String())
+				return
+			}
+			log.Println("[p2p] ICE restart offer received from joiner, answering")
+			if err := p.bridge.session.SetRemoteDescription(webrtc.SDPTypeOffer, sdpStr); err != nil {
+				log.Printf("[p2p] SetRemoteDescription(offer) failed: %v", err)
+				return
+			}
 			ans, err := p.bridge.session.CreateAnswer()
-			if err == nil && p.remotePeerID != nil {
+			if err != nil {
+				log.Printf("[p2p] CreateAnswer failed: %v", err)
+				return
+			}
+			if p.remotePeerID != nil {
 				p.bridge.vkSendTransmit(*p.remotePeerID, map[string]interface{}{
 					"sdp": map[string]interface{}{"type": ans.Type.String(), "sdp": ans.SDP},
 				})
+				log.Println("[p2p] ICE restart answer sent")
 			}
 		}
 	}
