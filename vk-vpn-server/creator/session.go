@@ -58,7 +58,13 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	se.DetachDataChannels()
 	se.SetSCTPMaxReceiveBufferSize(8 * 1024 * 1024)
 	se.EnableSCTPZeroChecksum(true)
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	// Custom API must register codecs explicitly — otherwise AddTrack/CreateOffer
+	// fail with "RTPSender created with no codecs" (client joiner does the same).
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterDefaultCodecs(); err != nil {
+		return nil, err
+	}
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 	if err != nil {
