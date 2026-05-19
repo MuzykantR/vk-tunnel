@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -238,7 +239,7 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 			s.sendDCFrame(connID, MsgData, buf[:n])
 		}
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 				log.Printf("[dc] conn %d read error: %v", connID, err)
 			}
 			break

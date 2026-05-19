@@ -428,7 +428,8 @@ func (j *Joiner) handleDCMessage(data []byte) {
 				log.Printf("[dc-in] conn %d: write error: %v", connID, err)
 			}
 		} else {
-			log.Printf("[dc-in] conn %d: no local conn found!", connID)
+			// Asynchronous race condition: client closed local socket while data was in transit.
+			// Silently drop the frame.
 		}
 	case msgClose:
 		j.mu.Lock()
@@ -774,17 +775,117 @@ func (j *Joiner) Close() {
 	StopCaptchaProxy()
 }
 
-// getPhysicalIP discovers the IP of the default physical adapter by doing a
-// UDP "connect" to an external IP (no actual data is sent).
+// getPhysicalIP discovers the IP of the default physical adapter. It first tries doing a
+// UDP "connect" to an external IP, then validates that the resolved IP does not belong to
+// a virtual adapter or the VPN subnet. If validation fails, it scans active network interfaces.
 func getPhysicalIP() string {
+	dialIP := ""
 	conn, err := net.Dial("udp4", "8.8.8.8:80")
-	if err != nil {
-		log.Printf("[ice] getPhysicalIP failed: %v", err)
-		return ""
+	if err == nil {
+		localAddr := conn.LocalAddr().(*net.UDPAddr)
+		dialIP = localAddr.IP.String()
+		conn.Close()
 	}
-	defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+
+	if dialIP != "" {
+		iface, err := getInterfaceByIP(dialIP)
+		if err == nil {
+			ifaceName := strings.ToLower(iface.Name)
+			isVirtual := false
+			virtualKeywords := []string{"wlvpn", "wintun", "tun", "tap", "loopback", "hyper-v", "vpn", "virtual", "host-only", "virtualbox", "vmware"}
+			for _, kw := range virtualKeywords {
+				if strings.Contains(ifaceName, kw) {
+					isVirtual = true
+					break
+				}
+			}
+			if strings.HasPrefix(dialIP, "10.8.0.") {
+				isVirtual = true
+			}
+			if !isVirtual {
+				return dialIP
+			}
+			log.Printf("[ice] Dialed IP %s belongs to a virtual/VPN interface '%s' (IP prefix/name match), scanning physical interfaces...", dialIP, iface.Name)
+		}
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("[ice] failed to list interfaces: %v", err)
+		return dialIP
+	}
+
+	for _, iface := range ifaces {
+		if (iface.Flags & net.FlagUp) == 0 {
+			continue
+		}
+		if (iface.Flags & net.FlagLoopback) != 0 {
+			continue
+		}
+		ifaceName := strings.ToLower(iface.Name)
+		isVirtual := false
+		virtualKeywords := []string{"wlvpn", "wintun", "tun", "tap", "loopback", "hyper-v", "vpn", "virtual", "host-only", "virtualbox", "vmware"}
+		for _, kw := range virtualKeywords {
+			if strings.Contains(ifaceName, kw) {
+				isVirtual = true
+				break
+			}
+		}
+		if isVirtual {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				ipStr := ip.String()
+				if strings.HasPrefix(ipStr, "10.8.0.") {
+					continue
+				}
+				log.Printf("[ice] Found physical adapter candidate IP: %s (interface: %s)", ipStr, iface.Name)
+				return ipStr
+			}
+		}
+	}
+
+	return dialIP
+}
+
+func getInterfaceByIP(ipStr string) (*net.Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	targetIP := net.ParseIP(ipStr)
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && ip.Equal(targetIP) {
+				return &iface, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("interface not found for IP %s", ipStr)
 }
 
 // isPrivateIP checks if the IP belongs to private subnetworks (RFC 1918, RFC 4193 etc).
