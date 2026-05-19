@@ -386,7 +386,14 @@ func (j *Joiner) initPC() {
 
 	neg := true
 	id := uint16(2)
-	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{Negotiated: &neg, ID: &id})
+	unordered := false
+	maxRetransmits := uint16(0)
+	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
+		Negotiated:     &neg,
+		ID:             &id,
+		Ordered:        &unordered,
+		MaxRetransmits: &maxRetransmits,
+	})
 	if err != nil {
 		return
 	}

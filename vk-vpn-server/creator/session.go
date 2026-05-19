@@ -50,13 +50,9 @@ type TunnelSession struct {
 	onICE      func(*webrtc.ICECandidate)
 	OnCloseReq func()
 
-	// dcSendCh is a single shared channel that funnels all outbound frames to one
-	// dedicated sender goroutine. This keeps dc.Send() calls off the hot read-path
-	// goroutines and ensures we never call dc.Send() concurrently (even though pion
-	// is internally thread-safe, serialising through a channel avoids SCTP contention
-	// and makes back-pressure explicit).
-	dcSendCh chan []byte
-	dcStopCh chan struct{}
+	dcSendCh  chan []byte
+	dcStopCh  chan struct{}
+	closeOnce sync.Once
 }
 
 func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
@@ -100,10 +96,17 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
-	// Tunnel DataChannel (Negotiated ID: 2)
+	// Tunnel DataChannel (Negotiated ID: 2, unordered + unreliable to avoid HoL blocking)
 	neg := true
 	id := uint16(2)
-	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{Negotiated: &neg, ID: &id})
+	unordered := false
+	maxRetransmits := uint16(0)
+	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
+		Negotiated:     &neg,
+		ID:             &id,
+		Ordered:        &unordered,
+		MaxRetransmits: &maxRetransmits,
+	})
 	if err != nil {
 		pc.Close()
 		return nil, err
@@ -195,11 +198,13 @@ func (s *TunnelSession) AddICECandidate(c webrtc.ICECandidateInit) error {
 }
 
 func (s *TunnelSession) Close() {
-	close(s.dcStopCh)
-	s.closeAllConns()
-	if s.pc != nil {
-		s.pc.Close()
-	}
+	s.closeOnce.Do(func() {
+		close(s.dcStopCh)
+		s.closeAllConns()
+		if s.pc != nil {
+			s.pc.Close()
+		}
+	})
 }
 
 func (s *TunnelSession) SetOnICE(fn func(*webrtc.ICECandidate)) {
