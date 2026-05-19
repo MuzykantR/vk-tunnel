@@ -17,12 +17,14 @@ type Daemon struct {
 	mu           sync.RWMutex
 	currentLink  string
 	serverPubKey string
+	resources    creator.ResourceProfile
 }
 
-func NewDaemon(cookies []config.CookieInfo) *Daemon {
+func NewDaemon(cookies []config.CookieInfo, resources creator.ResourceProfile) *Daemon {
 	return &Daemon{
 		cookies:      cookies,
 		serverPubKey: "mock_public_key_ed25519",
+		resources:    resources,
 	}
 }
 
@@ -70,7 +72,11 @@ func (d *Daemon) runSession(ctx context.Context) {
 	log.Printf("New Call created! Active link: %s", rawLink)
 
 	ice := webrtc.ParseICEFromJoin(joinBody)
-	bridge, err := creator.NewBridge(wsURL, ice, "1.1", "6")
+	sessOpts := creator.SessionOpts{
+		JoinLink:  rawLink,
+		Resources: d.resources,
+	}
+	bridge, err := creator.NewBridge(wsURL, ice, "1.1", "6", sessOpts)
 	if err != nil {
 		log.Printf("Failed to create creator bridge: %v", err)
 		return

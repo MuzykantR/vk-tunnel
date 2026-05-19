@@ -11,6 +11,7 @@ import (
 
 	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
+	"github.com/vk-vpn/client/tunnel"
 )
 
 // Message types for the framed DC protocol (compatible with whitelist-bypass)
@@ -32,6 +33,12 @@ type dcConn struct {
 	inCh chan []byte
 }
 
+// SessionOpts — tunables from whitelist-bypass headless --resources / join-link obfuscation.
+type SessionOpts struct {
+	JoinLink  string
+	Resources ResourceProfile
+}
+
 // TunnelSession is the creator-side WebRTC peer with a negotiated tunnel DataChannel.
 type TunnelSession struct {
 	pc        *webrtc.PeerConnection
@@ -41,6 +48,9 @@ type TunnelSession struct {
 	pending   []webrtc.ICECandidateInit
 	mu        sync.Mutex
 	conns     sync.Map
+	obf       *tunnel.TunnelObfuscator
+	readBuf   int
+	maxDCBuf  uint64
 
 	onICE      func(*webrtc.ICECandidate)
 	OnCloseReq func()
@@ -48,7 +58,7 @@ type TunnelSession struct {
 	closeOnce sync.Once
 }
 
-func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
+func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession, error) {
 	// SettingEngine matched to whitelist-bypass:
 	//   - DetachDataChannels: relay reads from raw ReadWriteCloser, never
 	//     blocks the SCTP reader on a slow consumer.
@@ -70,7 +80,22 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &TunnelSession{pc: pc}
+	s := &TunnelSession{
+		pc:       pc,
+		readBuf:  opts.Resources.ReadBuf,
+		maxDCBuf: opts.Resources.MaxDCBuf,
+	}
+	if s.readBuf <= 0 {
+		s.readBuf = 32 * 1024
+	}
+	if opts.JoinLink != "" {
+		if obf, err := tunnel.NewTunnelObfuscator(tunnel.DeriveSecretFromJoinLink(opts.JoinLink)); err == nil {
+			s.obf = obf
+			log.Printf("[creator] obfuscator on (epoch=0x%08x)", obf.LocalEpoch())
+		} else {
+			log.Printf("[creator] obfuscator disabled: %v", err)
+		}
+	}
 
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
 		log.Printf("[creator] ICE: %s", st.String())
@@ -230,6 +255,14 @@ func (s *TunnelSession) SignalingState() webrtc.SignalingState {
 // ---------- DC Relay (framed protocol, compatible with whitelist-bypass) ----------
 
 func (s *TunnelSession) handleDCMessage(data []byte) {
+	if s.obf != nil {
+		pt, ok := s.obf.DecryptPayload(data)
+		if !ok {
+			log.Printf("[dc] decrypt failed, drop %d bytes", len(data))
+			return
+		}
+		data = pt
+	}
 	if len(data) < 5 {
 		return
 	}
@@ -240,6 +273,8 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 	switch mt {
 	case MsgConnect:
 		go s.connectTCP(connID, string(payload))
+	case MsgUDP:
+		go s.handleUDP(connID, payload)
 	case MsgData:
 		val, ok := s.conns.Load(connID)
 		if !ok {
@@ -270,15 +305,60 @@ func (s *TunnelSession) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
+	wire := buf
+	if s.obf != nil {
+		wire = s.obf.EncryptPayload(buf)
+		if wire == nil {
+			return
+		}
+	}
 	if s.rawDC != nil {
-		if _, err := s.rawDC.Write(buf); err != nil {
+		if _, err := s.rawDC.Write(wire); err != nil {
 			// DC torn down; the connection cleanup will follow shortly.
 		}
 		return
 	}
 	if s.dc != nil && s.dc.ReadyState() == webrtc.DataChannelStateOpen {
-		s.dc.Send(buf)
+		s.dc.Send(wire)
 	}
+}
+
+func (s *TunnelSession) waitDCBackpressure() {
+	if s.maxDCBuf == 0 || s.dc == nil {
+		return
+	}
+	for s.dc.BufferedAmount() > s.maxDCBuf {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (s *TunnelSession) handleUDP(connID uint32, payload []byte) {
+	if len(payload) < 2 {
+		return
+	}
+	addrLen := int(payload[0])
+	if len(payload) < 1+addrLen {
+		return
+	}
+	addr := string(payload[1 : 1+addrLen])
+	data := payload[1+addrLen:]
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return
+	}
+	conn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	conn.Write(data)
+	resp := make([]byte, 4096)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return
+	}
+	s.sendDCFrame(connID, MsgUDPReply, resp[:n])
 }
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
@@ -317,11 +397,10 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 		conn.Close()
 	}()
 
-	// Reader: remote TCP → joiner (data going back to the client).
-	// Reads are done in a tight loop; we push frames onto the shared dcSendCh
-	// instead of calling dc.Send() directly. This keeps ICE unblocked.
-	buf := make([]byte, 32768)
+	// Reader: remote TCP → joiner. Pause reads when DC send buffer is full (WLB max-dc-buf).
+	buf := make([]byte, s.readBuf)
 	for {
+		s.waitDCBackpressure()
 		n, err := conn.Read(buf)
 		if n > 0 {
 			s.sendDCFrame(connID, MsgData, buf[:n])

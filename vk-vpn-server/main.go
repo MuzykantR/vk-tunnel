@@ -10,13 +10,20 @@ import (
 
 	"github.com/vk-vpn/server/api"
 	"github.com/vk-vpn/server/config"
+	"github.com/vk-vpn/server/creator"
 	"github.com/vk-vpn/server/daemon"
 )
 
 func main() {
 	cookiesPath := flag.String("cookies", "cookies.json", "Path to cookies.json file")
 	apiPort := flag.Int("port", 8080, "Local API port for the Bot")
+	resources := flag.String("resources", "default", "Resource mode: moderate | default | unlimited | custom (whitelist-bypass)")
+	customReadBuf := flag.Int("read-buf", 0, "TCP/DC read buffer with --resources custom")
+	customMaxDCBuf := flag.Int("max-dc-buf", 0, "DC BufferedAmount threshold with --resources custom")
+	customMemLimit := flag.Int64("mem-limit", 0, "Go soft memory limit with --resources custom")
 	flag.Parse()
+
+	resProfile := creator.ParseResources(*resources, *customReadBuf, *customMaxDCBuf, *customMemLimit)
 
 	// Load VK cookies (used for authentication and creating calls)
 	cookies, err := config.LoadCookies(*cookiesPath)
@@ -26,7 +33,7 @@ func main() {
 	}
 
 	// Initialize the main VPN Creator Daemon
-	vpnDaemon := daemon.NewDaemon(cookies)
+	vpnDaemon := daemon.NewDaemon(cookies, resProfile)
 
 	// Create root context to handle graceful shutdown (Ctrl+C)
 	ctx, cancel := context.WithCancel(context.Background())

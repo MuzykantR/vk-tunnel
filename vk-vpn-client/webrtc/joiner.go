@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
+	"github.com/vk-vpn/client/tunnel"
 )
 
 // Joiner — headless VK joiner (whitelist-bypass vk_joiner.go), DC tunnel mode.
@@ -65,11 +66,12 @@ type Joiner struct {
 	// frequently kills the keepalive flow.
 	iceStableCh   chan struct{}
 	iceStableOnce sync.Once
+	obf           *tunnel.TunnelObfuscator
 }
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 	childCtx, cancel := context.WithCancel(ctx)
-	return &Joiner{
+	j := &Joiner{
 		auth:         auth,
 		socksPort:    socksPort,
 		readyCh:      make(chan struct{}),
@@ -81,6 +83,15 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 		connectCh:    make(map[uint32]chan error),
 		remoteIPs:    make(map[string]bool),
 	}
+	if auth != nil && auth.JoinLink != "" {
+		if obf, err := tunnel.NewTunnelObfuscator(tunnel.DeriveSecretFromJoinLink(auth.JoinLink)); err == nil {
+			j.obf = obf
+			log.Printf("Joiner: obfuscator on (epoch=0x%08x)", obf.LocalEpoch())
+		} else {
+			log.Printf("Joiner: obfuscator off: %v", err)
+		}
+	}
+	return j
 }
 
 func (j *Joiner) Ready() <-chan struct{} { return j.readyCh }
@@ -450,21 +461,35 @@ func (j *Joiner) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
+	wire := buf
+	if j.obf != nil {
+		wire = j.obf.EncryptPayload(buf)
+		if wire == nil {
+			return
+		}
+	}
 	if j.rawDC != nil {
 		// Raw write — bypasses pion's OnMessage scheduling and produces
 		// far less goroutine churn than dc.Send under sustained load.
-		if _, err := j.rawDC.Write(buf); err != nil {
+		if _, err := j.rawDC.Write(wire); err != nil {
 			// rawDC.Write only errors when the DC is gone; nothing useful
 			// to do here besides drop the frame — TCP will retransmit.
 		}
 		return
 	}
 	if j.dc != nil {
-		j.dc.Send(buf)
+		j.dc.Send(wire)
 	}
 }
 
 func (j *Joiner) handleDCMessage(data []byte) {
+	if j.obf != nil {
+		pt, ok := j.obf.DecryptPayload(data)
+		if !ok {
+			return
+		}
+		data = pt
+	}
 	if len(data) < 5 {
 		return
 	}

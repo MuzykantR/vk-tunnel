@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/vk-vpn/vk-vpn-server
-ExecStart=/opt/vk-vpn/vk-vpn-server/vk-vpn-daemon --cookies=cookies.json --port=8080
+ExecStart=/opt/vk-vpn/vk-vpn-server/vk-vpn-daemon --cookies=cookies.json --port=8080 --resources=unlimited
 Restart=always
 RestartSec=3
 TimeoutStopSec=2

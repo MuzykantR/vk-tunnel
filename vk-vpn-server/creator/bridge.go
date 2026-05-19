@@ -23,14 +23,15 @@ type Bridge struct {
 	peers       map[int64]struct{}
 	session     *TunnelSession
 	p2p         *P2PHandler
-	wsURL       string
-	appVersion  string
+	wsURL        string
+	appVersion   string
 	protoVersion string
+	sessionOpts  SessionOpts
 }
 
-func NewBridge(wsURL string, ice vkice.ICEConfig, appVer, protoVer string) (*Bridge, error) {
+func NewBridge(wsURL string, ice vkice.ICEConfig, appVer, protoVer string, sessOpts SessionOpts) (*Bridge, error) {
 	servers := buildICE(ice)
-	sess, err := NewTunnelSession(servers)
+	sess, err := NewTunnelSession(servers, sessOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +43,7 @@ func NewBridge(wsURL string, ice vkice.ICEConfig, appVer, protoVer string) (*Bri
 		wsURL:        wsURL,
 		appVersion:   appVer,
 		protoVersion: protoVer,
+		sessionOpts:  sessOpts,
 	}
 	sess.OnCloseReq = func() {
 		log.Println("[creator] PeerConnection disconnected/failed. Initiating call recycle...")
@@ -273,8 +275,7 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	case "participant-left", "hungup":
 		if pid, ok := parsePID(msg["participantId"]); ok {
 			delete(b.peers, pid)
-			log.Printf("[vk-ws]    Participant %d left. Closing bridge to recycle session...", pid)
-			b.Close()
+			log.Printf("[vk-ws]    Participant %d left (total %d) — waiting for re-join (WLB model)", pid, len(b.peers))
 		}
 	}
 }

@@ -45,7 +45,7 @@ func (p *P2PHandler) Reset() {
 	log.Println("[p2p] Resetting session...")
 	p.connected = false
 	p.bridge.session.Close()
-	sess, err := NewTunnelSession(p.bridge.iceServers)
+	sess, err := NewTunnelSession(p.bridge.iceServers, p.bridge.sessionOpts)
 	if err != nil {
 		log.Printf("[p2p] reset session: %v", err)
 		return
