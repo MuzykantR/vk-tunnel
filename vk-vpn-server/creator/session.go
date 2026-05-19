@@ -41,16 +41,20 @@ type SessionOpts struct {
 
 // TunnelSession is the creator-side WebRTC peer with a negotiated tunnel DataChannel.
 type TunnelSession struct {
-	pc        *webrtc.PeerConnection
-	dc        *webrtc.DataChannel
-	rawDC     datachannel.ReadWriteCloser // non-nil when Detach() succeeded
-	remoteSet bool
-	pending   []webrtc.ICECandidateInit
-	mu        sync.Mutex
-	conns     sync.Map
-	obf       *tunnel.TunnelObfuscator
-	readBuf   int
-	maxDCBuf  uint64
+	pc          *webrtc.PeerConnection
+	dc          *webrtc.DataChannel
+	rawDC       datachannel.ReadWriteCloser // non-nil when Detach() succeeded
+	sampleTrack *webrtc.TrackLocalStaticSample
+	vp8Tunnel   *tunnel.VP8DataTunnel
+	videoRelay  *tunnel.RelayBridge
+	remoteSet   bool
+	pending     []webrtc.ICECandidateInit
+	mu          sync.Mutex
+	conns       sync.Map
+	obf         *tunnel.TunnelObfuscator
+	readBuf     int
+	maxDCBuf    uint64
+	videoOnce   sync.Once
 
 	onICE      func(*webrtc.ICECandidate)
 	OnCloseReq func()
@@ -117,8 +121,32 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	}
 	video, _ := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "v")
 	if video != nil {
+		s.sampleTrack = video
 		pc.AddTrack(video)
 	}
+
+	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if track.Codec().MimeType != webrtc.MimeTypeVP8 {
+			buf := make([]byte, 4096)
+			for {
+				if _, _, err := track.Read(buf); err != nil {
+					return
+				}
+			}
+		}
+		s.videoOnce.Do(func() {
+			log.Println("[creator] === MODE: VIDEO (VP8) ===")
+			tun := tunnel.NewVP8DataTunnel(s.sampleTrack, s.obf, log.Printf)
+			tun.Start(tunnel.DefaultVP8FPS, tunnel.DefaultVP8Batch)
+			s.vp8Tunnel = tun
+			s.videoRelay = tunnel.NewRelayBridge(tun, "creator", s.readBuf, log.Printf)
+		})
+		go tunnel.ReadVP8TrackLogged(track, func(frame []byte) {
+			if s.vp8Tunnel != nil {
+				s.vp8Tunnel.HandleFrame(frame)
+			}
+		})
+	})
 
 	// VK-specific DataChannels
 	ordered := true
@@ -233,6 +261,12 @@ func (s *TunnelSession) AddICECandidate(c webrtc.ICECandidateInit) error {
 func (s *TunnelSession) Close() {
 	s.closeOnce.Do(func() {
 		s.closeAllConns()
+		if s.vp8Tunnel != nil {
+			s.vp8Tunnel.Stop()
+		}
+		if s.videoRelay != nil {
+			s.videoRelay.Close()
+		}
 		if s.rawDC != nil {
 			s.rawDC.Close()
 		}

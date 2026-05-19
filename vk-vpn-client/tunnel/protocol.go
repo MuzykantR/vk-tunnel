@@ -22,6 +22,34 @@ type DataTunnel interface {
 	Reconfigure(fps, batch int)
 }
 
+func EncodeVP8Config(fps, batch int) []byte {
+	if fps < 1 {
+		fps = 1
+	}
+	if batch < 1 {
+		batch = 1
+	}
+	if fps > 0xFFFF {
+		fps = 0xFFFF
+	}
+	if batch > 0xFFFF {
+		batch = 0xFFFF
+	}
+	var payload [4]byte
+	binary.BigEndian.PutUint16(payload[0:2], uint16(fps))
+	binary.BigEndian.PutUint16(payload[2:4], uint16(batch))
+	return EncodeFrame(ControlConnID, MsgConfig, payload[:])
+}
+
+func DecodeVP8Config(payload []byte) (fps, batch int, ok bool) {
+	if len(payload) < 4 {
+		return 0, 0, false
+	}
+	fps = int(binary.BigEndian.Uint16(payload[0:2]))
+	batch = int(binary.BigEndian.Uint16(payload[2:4]))
+	return fps, batch, true
+}
+
 func EncodeFrame(connID uint32, msgType byte, payload []byte) []byte {
 	buf := make([]byte, 4+5+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], uint32(5+len(payload)))

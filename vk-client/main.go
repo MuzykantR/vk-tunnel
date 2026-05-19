@@ -124,12 +124,17 @@ func (a *App) Connect(uri string) error {
 	// starts the ICE agent. Cheap insurance, hard to debug if skipped.
 	time.Sleep(1 * time.Second)
 
-	onNewBypassIP := func(ip string) {
-		if ip == "" {
+	onNewBypassIP := func(ipOrCand string) {
+		if ipOrCand == "" {
 			return
 		}
-		log.Printf("Dynamic bypass for new ICE IP: %s", ip)
-		wintun.AddBypassRoute(ip, a.defaultGW)
+		if strings.Contains(ipOrCand, "candidate:") {
+			log.Printf("Dynamic bypass (candidate): %s", ipOrCand)
+			wintun.AddBypassFromCandidate(ipOrCand, a.defaultGW)
+			return
+		}
+		log.Printf("Dynamic bypass for new ICE IP: %s", ipOrCand)
+		wintun.AddBypassRoute(ipOrCand, a.defaultGW)
 	}
 	a.bypassSink = onNewBypassIP
 
@@ -139,20 +144,22 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// Wait for the ICE agent to be stably connected (one full second of
-	// uninterrupted connected/completed state) before we install the
-	// 0.0.0.0/1 default route through WLVPN. Adding that route while ICE
-	// is still mid-handshake repeatedly kills the keepalive flow and forces
-	// an ICE restart 5 s later. Fall back to a 6 s ceiling so we never hang.
-	log.Println("Waiting for ICE to stabilize before redirecting default traffic...")
-	select {
-	case <-clientAPI.IceStable():
-		log.Println("ICE is stable; safe to redirect default route")
-	case <-time.After(6 * time.Second):
-		log.Println("ICE stability wait timed out — proceeding anyway")
+	// WLB model: full default route ONLY after ICE stayed connected 3s continuously.
+	// Never redirect on a timeout — that was causing disconnect exactly at +6s.
+	log.Println("Waiting for ICE to stabilize (up to 90s, no fallback)...")
+	iceCtx, iceCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer iceCancel()
+	if err := clientAPI.WaitIceStable(iceCtx); err != nil {
+		a.partialTeardown()
+		return fmt.Errorf("ICE did not stabilize: %w", err)
 	}
+	log.Println("ICE stable — flushing bypass routes before default redirect")
+	for _, ip := range clientAPI.GetActiveBypassIPs() {
+		wintun.AddBypassRoute(ip, a.defaultGW)
+	}
+	time.Sleep(2 * time.Second)
 
-	log.Println("Redirecting default traffic through tunnel...")
+	log.Println("Redirecting default traffic through tunnel (WLVPN)...")
 	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
 		a.partialTeardown()
 		return err

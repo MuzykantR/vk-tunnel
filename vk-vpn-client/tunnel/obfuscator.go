@@ -99,3 +99,119 @@ func (o *TunnelObfuscator) DecryptPayload(data []byte) ([]byte, bool) {
 	}
 	return plaintext, true
 }
+
+// --- VP8 RTP obfuscation (whitelist-bypass) ---
+
+var vp8Keepalive = []byte{
+	0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00,
+	0x10, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85, 0x88,
+	0x99, 0x84, 0x88, 0xfc,
+}
+
+var vp8Interframe = []byte{
+	0xb1, 0x01, 0x00, 0x08, 0x11, 0x18, 0x00, 0x18,
+	0x00, 0x18, 0x58, 0x2f, 0xf4, 0x00, 0x08, 0x00,
+	0x00,
+}
+
+const (
+	vp8KeepaliveLen  = 20
+	vp8InterframeLen = 17
+	epochFieldLen    = 4
+)
+
+type DecodeResult struct {
+	HasFrame    bool
+	Keepalive   bool
+	SelfEcho    bool
+	PeerRestart bool
+	Payload     []byte
+	PeerEpoch   uint32
+}
+
+func (o *TunnelObfuscator) keepaliveHeader() []byte {
+	hdr := make([]byte, vp8KeepaliveLen+epochFieldLen)
+	copy(hdr, vp8Keepalive)
+	binary.BigEndian.PutUint32(hdr[vp8KeepaliveLen:], o.localEpoch)
+	return hdr
+}
+
+func (o *TunnelObfuscator) dataHeader() []byte {
+	hdr := make([]byte, vp8InterframeLen+epochFieldLen)
+	copy(hdr, vp8Interframe)
+	binary.BigEndian.PutUint32(hdr[vp8InterframeLen:], o.localEpoch)
+	return hdr
+}
+
+func (o *TunnelObfuscator) EncodeKeepalive() []byte {
+	return o.keepaliveHeader()
+}
+
+func (o *TunnelObfuscator) EncodeData(payload []byte) []byte {
+	hdr := o.dataHeader()
+	nonce := make([]byte, o.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil
+	}
+	out := make([]byte, 0, len(hdr)+len(nonce)+len(payload)+o.aead.Overhead())
+	out = append(out, hdr...)
+	out = append(out, nonce...)
+	return o.aead.Seal(out, nonce, payload, nil)
+}
+
+func (o *TunnelObfuscator) Decode(frame []byte) DecodeResult {
+	if o == nil {
+		if len(frame) > 0 {
+			return DecodeResult{HasFrame: true, Payload: frame}
+		}
+		return DecodeResult{}
+	}
+	if len(frame) < 1 {
+		return DecodeResult{}
+	}
+	var hdrLen, epochOff int
+	switch frame[0] {
+	case vp8Keepalive[0]:
+		hdrLen = vp8KeepaliveLen + epochFieldLen
+		epochOff = vp8KeepaliveLen
+	case vp8Interframe[0]:
+		hdrLen = vp8InterframeLen + epochFieldLen
+		epochOff = vp8InterframeLen
+	default:
+		return DecodeResult{}
+	}
+	if len(frame) < hdrLen {
+		return DecodeResult{}
+	}
+	peerEpoch := binary.BigEndian.Uint32(frame[epochOff : epochOff+epochFieldLen])
+	if peerEpoch == o.localEpoch {
+		return DecodeResult{HasFrame: true, SelfEcho: true, PeerEpoch: peerEpoch}
+	}
+	res := DecodeResult{HasFrame: true, PeerEpoch: peerEpoch}
+	o.mu.Lock()
+	if !o.hasPeer {
+		o.peerEpoch = peerEpoch
+		o.hasPeer = true
+	} else if o.peerEpoch != peerEpoch {
+		o.peerEpoch = peerEpoch
+		res.PeerRestart = true
+	}
+	o.mu.Unlock()
+	if len(frame) == hdrLen {
+		res.Keepalive = true
+		return res
+	}
+	body := frame[hdrLen:]
+	nonceSize := o.aead.NonceSize()
+	if len(body) < nonceSize+o.aead.Overhead() {
+		return DecodeResult{}
+	}
+	nonce := body[:nonceSize]
+	ciphertext := body[nonceSize:]
+	plaintext, err := o.aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return DecodeResult{}
+	}
+	res.Payload = plaintext
+	return res
+}

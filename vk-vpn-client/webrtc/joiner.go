@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,8 +44,12 @@ type Joiner struct {
 	pc            *webrtc.PeerConnection
 	dc            *webrtc.DataChannel
 	dcTunnel      *tunnel.DCTunnel
+	vp8Tunnel     *tunnel.VP8DataTunnel
+	sampleTrack   *webrtc.TrackLocalStaticSample
+	tunnelMode    string
 	relay         *tunnel.RelayBridge
 	remoteSet     bool
+	firstConnected time.Time
 	pendingICE    []webrtc.ICECandidateInit
 	answerSent    bool
 	remoteIPs     map[string]bool // IPs from remote ICE candidates (VPS IP for P2P bypass)
@@ -67,6 +72,10 @@ type Joiner struct {
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 	childCtx, cancel := context.WithCancel(ctx)
+	mode := os.Getenv("VK_VPN_TUNNEL_MODE")
+	if mode != "dc" && mode != "video" {
+		mode = "video"
+	}
 	j := &Joiner{
 		auth:         auth,
 		socksPort:    socksPort,
@@ -75,6 +84,7 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 		ctx:          childCtx,
 		cancel:       cancel,
 		remoteIPs:    make(map[string]bool),
+		tunnelMode:   mode,
 	}
 	if auth != nil && auth.JoinLink != "" {
 		if obf, err := tunnel.NewTunnelObfuscator(tunnel.DeriveSecretFromJoinLink(auth.JoinLink)); err == nil {
@@ -347,9 +357,12 @@ func (j *Joiner) initPC() {
 		log.Printf("Client ICE state: %s", s.String())
 		switch s {
 		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
-			// Mark ICE stable only after we've stayed in connected/completed
-			// for a continuous second — this is what tells the host app it's
-			// safe to install the 0.0.0.0/1 default route.
+			j.mu.Lock()
+			if j.firstConnected.IsZero() {
+				j.firstConnected = time.Now()
+				log.Printf("Joiner: first ICE connected at %s", j.firstConnected.Format(time.RFC3339))
+			}
+			j.mu.Unlock()
 			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
 			// Transient disconnect during first ICE handshake is normal (connected→
@@ -369,8 +382,21 @@ func (j *Joiner) initPC() {
 		}
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		log.Printf("Client connection state: %s", s.String())
+		log.Printf("Client connection state: %s (tunnel=%s)", s.String(), j.tunnelMode)
+		if j.tunnelMode == "video" && s == webrtc.PeerConnectionStateConnected {
+			go j.startVideoTunnel()
+		}
 	})
+	if j.tunnelMode == "video" {
+		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+			log.Printf("Joiner: remote track %s", track.Codec().MimeType)
+			go tunnel.ReadVP8TrackLogged(track, func(frame []byte) {
+				if j.vp8Tunnel != nil {
+					j.vp8Tunnel.HandleFrame(frame)
+				}
+			})
+		})
+	}
 
 	audio, _ := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "a")
 	if audio != nil {
@@ -378,6 +404,7 @@ func (j *Joiner) initPC() {
 	}
 	video, _ := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "v")
 	if video != nil {
+		j.sampleTrack = video
 		pc.AddTrack(video)
 	}
 	ordered := true
@@ -403,9 +430,11 @@ func (j *Joiner) initPC() {
 	}
 	j.dc = dc
 	dc.OnOpen(func() {
-		log.Println("VPN tunnel DataChannel open")
+		log.Printf("VPN tunnel DataChannel open (mode=%s)", j.tunnelMode)
 		dc.SetBufferedAmountLowThreshold(dcBufferedLowThreshold)
-
+		if j.tunnelMode != "dc" {
+			return
+		}
 		raw, err := dc.Detach()
 		if err != nil {
 			log.Printf("Joiner: dc.Detach failed: %v", err)
@@ -413,17 +442,7 @@ func (j *Joiner) initPC() {
 		} else {
 			j.dcTunnel = tunnel.NewDCTunnelFromRaw(dc, raw, j.obf, 0, log.Printf)
 		}
-		j.relay = tunnel.NewRelayBridge(j.dcTunnel, "joiner", 0, log.Printf)
-		j.relay.MarkReady()
-		j.readyOnce.Do(func() { close(j.readyCh) })
-
-		addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
-		go func() {
-			log.Printf("SOCKS5 via RelayBridge on %s", addr)
-			if err := j.relay.ListenSOCKS(addr); err != nil {
-				log.Printf("RelayBridge SOCKS stopped: %v", err)
-			}
-		}()
+		j.attachRelay(j.dcTunnel)
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -432,10 +451,47 @@ func (j *Joiner) initPC() {
 		}
 		j.vkSendTransmit(*j.remotePeerID, map[string]interface{}{"candidate": c.ToJSON()})
 	})
-	log.Println("Joiner: PC ready, waiting for offer")
+	log.Printf("Joiner: PC ready (tunnel=%s), waiting for offer", j.tunnelMode)
 }
 
-// SOCKS/DC relay is handled by tunnel.RelayBridge + tunnel.DCTunnel (whitelist-bypass).
+func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
+	j.mu.Lock()
+	if j.relay != nil {
+		j.mu.Unlock()
+		return
+	}
+	j.mu.Unlock()
+	j.relay = tunnel.NewRelayBridge(t, "joiner", 0, log.Printf)
+	j.relay.MarkReady()
+	j.readyOnce.Do(func() { close(j.readyCh) })
+	addr := fmt.Sprintf("127.0.0.1:%d", j.socksPort)
+	go func() {
+		log.Printf("SOCKS5 via RelayBridge (%s) on %s", j.tunnelMode, addr)
+		if err := j.relay.ListenSOCKS(addr); err != nil {
+			log.Printf("RelayBridge SOCKS stopped: %v", err)
+		}
+	}()
+}
+
+func (j *Joiner) startVideoTunnel() {
+	j.mu.Lock()
+	if j.vp8Tunnel != nil {
+		j.mu.Unlock()
+		return
+	}
+	j.mu.Unlock()
+	if j.sampleTrack == nil {
+		log.Println("Joiner: video mode but no sample track")
+		return
+	}
+	log.Println("Joiner: === VP8 TUNNEL CONNECTED ===")
+	j.vp8Tunnel = tunnel.NewVP8DataTunnel(j.sampleTrack, j.obf, log.Printf)
+	j.vp8Tunnel.Start(tunnel.DefaultVP8FPS, tunnel.DefaultVP8Batch)
+	j.vp8Tunnel.SendData(tunnel.EncodeVP8Config(j.vp8Tunnel.FPS(), j.vp8Tunnel.Batch()))
+	j.attachRelay(j.vp8Tunnel)
+}
+
+// SOCKS/DC/VP8 relay is handled by tunnel.RelayBridge (whitelist-bypass).
 
 func (j *Joiner) onRegisteredPeer(pid int64) {
 	j.remotePeerID = &pid
@@ -477,6 +533,7 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 							// handed to pion. This guarantees STUN keepalives leave through
 							// the physical adapter from packet #1 — no race with route ADD.
 							j.reportBypassIP(candIP)
+							j.reportBypassIP(ice.Candidate)
 						}
 					}
 				}
@@ -656,6 +713,9 @@ func (j *Joiner) Close() {
 			j.cancel()
 		}
 
+		if j.vp8Tunnel != nil {
+			j.vp8Tunnel.Stop()
+		}
 		if j.relay != nil {
 			j.relay.Close()
 		}
@@ -677,7 +737,7 @@ func (j *Joiner) Close() {
 // in connected/completed for 1 s. If state flips back during the wait
 // the closure is skipped — caller will retry on next state change.
 func (j *Joiner) maybeMarkICEStable() {
-	timer := time.NewTimer(1 * time.Second)
+	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-j.ctx.Done():
@@ -693,7 +753,7 @@ func (j *Joiner) maybeMarkICEStable() {
 	}
 	j.iceStableOnce.Do(func() {
 		j.iceStableReached.Store(true)
-		log.Println("ICE stable for 1s — keepalive flow established")
+		log.Println("ICE stable for 3s — safe to redirect default route")
 		close(j.iceStableCh)
 	})
 }
@@ -703,7 +763,7 @@ func (j *Joiner) maybeMarkICEStable() {
 // are still in disconnected after the grace, ask the creator side for an
 // ICE restart by issuing a renegotiation offer.
 func (j *Joiner) handleICEDisconnect() {
-	const grace = 2 * time.Second
+	const grace = 12 * time.Second
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {
@@ -735,6 +795,18 @@ func (j *Joiner) handleICEFailed() {
 // pion's PeerConnection supports the role flip via SetLocalDescription(offer)
 // when SignalingState is stable.
 func (j *Joiner) requestICERestart() {
+	j.mu.Lock()
+	first := j.firstConnected
+	j.mu.Unlock()
+	if first.IsZero() {
+		log.Println("ICE restart: suppressed (never connected)")
+		return
+	}
+	if time.Since(first) < 45*time.Second {
+		log.Printf("ICE restart: suppressed (within 45s of first connect, elapsed=%s)", time.Since(first).Round(time.Second))
+		return
+	}
+
 	j.iceRestartMu.Lock()
 	if j.iceRestarting {
 		j.iceRestartMu.Unlock()
@@ -813,6 +885,7 @@ func (j *Joiner) filterAndExtractSDPCandidates(sdp string) string {
 						j.remoteIPs[ipStr] = true
 						log.Printf("[bypass] Extracted SDP remote ICE candidate IP: %s", ipStr)
 						j.reportBypassIP(ipStr)
+						j.reportBypassIP(trimmed)
 					}
 				}
 			}

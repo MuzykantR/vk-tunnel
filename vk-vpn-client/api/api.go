@@ -68,7 +68,7 @@ func StartJoinerWithAuth(auth *webrtc.AuthParams, socksPort int, onNewBypassIP f
 
 	select {
 	case <-joiner.Ready():
-		log.Println("VPN tunnel DataChannel ready")
+		log.Println("VPN tunnel ready (DC or VP8)")
 		return nil
 	case <-time.After(120 * time.Second):
 		cancel()
@@ -162,6 +162,27 @@ func collectBypassIPs(auth *webrtc.AuthParams) []string {
 	}
 
 	return ips
+}
+
+// WaitIceStable blocks until ICE has been stable or ctx is cancelled. No fallback redirect.
+func WaitIceStable(ctx context.Context) error {
+	if activeJoiner == nil {
+		return fmt.Errorf("no active joiner")
+	}
+	select {
+	case <-activeJoiner.IceStable():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// GetActiveBypassIPs returns ICE/TURN/STUN IPs that must bypass the tunnel.
+func GetActiveBypassIPs() []string {
+	if activeJoiner == nil {
+		return nil
+	}
+	return activeJoiner.GetBypassIPs()
 }
 
 // IceStable returns a channel that closes the first time the active joiner's
