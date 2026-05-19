@@ -164,6 +164,18 @@ func collectBypassIPs(auth *webrtc.AuthParams) []string {
 	return ips
 }
 
+// IceStable returns a channel that closes the first time the active joiner's
+// ICE agent has been continuously connected/completed for at least 1 second.
+// Returns a closed channel if no joiner is active so callers don't block forever.
+func IceStable() <-chan struct{} {
+	if activeJoiner == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return activeJoiner.IceStable()
+}
+
 func StopClient() {
 	if cancelFunc != nil {
 		cancelFunc()

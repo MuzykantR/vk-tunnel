@@ -56,6 +56,14 @@ type Joiner struct {
 	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
 	iceRestartMu  sync.Mutex
 	iceRestarting bool
+
+	// iceStableCh fires once when ICE first reaches connected/completed AND has
+	// produced at least one successful host-to-host roundtrip (we sample after
+	// 1 s of being "connected"). The caller uses this to gate the default-route
+	// install — installing 0.0.0.0/1 → WLVPN while ICE is still in "checking"
+	// frequently kills the keepalive flow.
+	iceStableCh   chan struct{}
+	iceStableOnce sync.Once
 }
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
@@ -64,6 +72,7 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 		auth:         auth,
 		socksPort:    socksPort,
 		readyCh:      make(chan struct{}),
+		iceStableCh:  make(chan struct{}),
 		ctx:          childCtx,
 		cancel:       cancel,
 		socksConns:   make(map[uint32]net.Conn),
@@ -74,6 +83,12 @@ func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 }
 
 func (j *Joiner) Ready() <-chan struct{} { return j.readyCh }
+
+// IceStable fires (closed) once the ICE agent has been in connected/completed
+// state continuously for at least 1 second, indicating that the keepalive
+// flow is established on the physical adapter and routing-table changes are
+// safe to apply.
+func (j *Joiner) IceStable() <-chan struct{} { return j.iceStableCh }
 
 // SetOnNewBypassIP registers a callback invoked the moment a new remote ICE
 // candidate IP becomes known. The caller is expected to install a /32 bypass
@@ -360,6 +375,11 @@ func (j *Joiner) initPC() {
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		log.Printf("Client ICE state: %s", s.String())
 		switch s {
+		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
+			// Mark ICE stable only after we've stayed in connected/completed
+			// for a continuous second — this is what tells the host app it's
+			// safe to install the 0.0.0.0/1 default route.
+			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
 			go j.handleICEDisconnect()
 		case webrtc.ICEConnectionStateFailed:
@@ -384,15 +404,17 @@ func (j *Joiner) initPC() {
 	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
+	// Tunnel DataChannel (Negotiated ID: 2).
+	// Ordered=false → no head-of-line blocking when one UDP packet is lost.
+	// No MaxRetransmits/MaxPacketLifeTime → SCTP is reliable.
+	// Required for MsgConnect / MsgConnectOK / MsgClose to be delivered.
 	neg := true
 	id := uint16(2)
-	unordered := false
-	maxRetransmits := uint16(0)
+	tunnelOrdered := false
 	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
-		Negotiated:     &neg,
-		ID:             &id,
-		Ordered:        &unordered,
-		MaxRetransmits: &maxRetransmits,
+		Negotiated: &neg,
+		ID:         &id,
+		Ordered:    &tunnelOrdered,
 	})
 	if err != nil {
 		return
@@ -557,6 +579,13 @@ func (j *Joiner) handleSOCKS(conn net.Conn) {
 		}
 		ip := net.IP(buf[4:20])
 		port := binary.BigEndian.Uint16(buf[20:22])
+		// Reject unroutable IPv6 (link-local, multicast, unspecified) up-front.
+		// Sending these into the tunnel always fails on the VPS and clutters
+		// the server log with `dial tcp [fe80::...]: invalid argument`.
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // host unreachable
+			return
+		}
 		target = fmt.Sprintf("[%s]:%d", ip.String(), port)
 	default:
 		return
@@ -899,12 +928,36 @@ func (j *Joiner) Close() {
 	})
 }
 
-// handleICEDisconnect waits a few seconds for pion's own recovery (it may
-// flip back to connected on its own once STUN keepalives resume). If we are
-// still in disconnected after the grace period, ask the creator side for an
+// maybeMarkICEStable closes iceStableCh after the agent has stayed
+// in connected/completed for 1 s. If state flips back during the wait
+// the closure is skipped — caller will retry on next state change.
+func (j *Joiner) maybeMarkICEStable() {
+	timer := time.NewTimer(1 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-j.ctx.Done():
+		return
+	case <-timer.C:
+	}
+	if j.pc == nil {
+		return
+	}
+	st := j.pc.ICEConnectionState()
+	if st != webrtc.ICEConnectionStateConnected && st != webrtc.ICEConnectionStateCompleted {
+		return
+	}
+	j.iceStableOnce.Do(func() {
+		log.Println("ICE stable for 1s — keepalive flow established")
+		close(j.iceStableCh)
+	})
+}
+
+// handleICEDisconnect waits a short grace period for pion's own recovery (it
+// may flip back to connected on its own once STUN keepalives resume). If we
+// are still in disconnected after the grace, ask the creator side for an
 // ICE restart by issuing a renegotiation offer.
 func (j *Joiner) handleICEDisconnect() {
-	const grace = 4 * time.Second
+	const grace = 2 * time.Second
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {

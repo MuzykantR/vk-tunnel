@@ -139,14 +139,18 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// Short pause: let the ICE agent send at least one successful STUN keepalive
-	// on the stable routing table before we add the 0.0.0.0/1 default route.
-	// Without this, the route table change arrives mid-keepalive cycle and pion's
-	// 5-second consent timer fires → one transient ICE disconnect right after connect.
-	// 2 seconds is enough for pion to complete one full keepalive round-trip (~500ms)
-	// and enter a stable ICE "completed" state.
+	// Wait for the ICE agent to be stably connected (one full second of
+	// uninterrupted connected/completed state) before we install the
+	// 0.0.0.0/1 default route through WLVPN. Adding that route while ICE
+	// is still mid-handshake repeatedly kills the keepalive flow and forces
+	// an ICE restart 5 s later. Fall back to a 6 s ceiling so we never hang.
 	log.Println("Waiting for ICE to stabilize before redirecting default traffic...")
-	time.Sleep(2 * time.Second)
+	select {
+	case <-clientAPI.IceStable():
+		log.Println("ICE is stable; safe to redirect default route")
+	case <-time.After(6 * time.Second):
+		log.Println("ICE stability wait timed out — proceeding anyway")
+	}
 
 	log.Println("Redirecting default traffic through tunnel...")
 	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {

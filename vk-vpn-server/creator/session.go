@@ -96,16 +96,21 @@ func NewTunnelSession(ice []webrtc.ICEServer) (*TunnelSession, error) {
 	pc.CreateDataChannel("producerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 	pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered})
 
-	// Tunnel DataChannel (Negotiated ID: 2, unordered + unreliable to avoid HoL blocking)
+	// Tunnel DataChannel (Negotiated ID: 2).
+	// Ordered=false → no head-of-line blocking when one UDP packet is lost.
+	// MaxRetransmits/MaxPacketLifeTime NOT set → SCTP is reliable.
+	// Our framed protocol REQUIRES reliable delivery for control frames
+	// (MsgConnect, MsgConnectOK, MsgClose) — a lost MsgConnect causes a
+	// 30 s SOCKS timeout on the client. The connID in every frame makes
+	// out-of-order delivery safe for data frames, so unordered+reliable
+	// is the right trade-off.
 	neg := true
 	id := uint16(2)
-	unordered := false
-	maxRetransmits := uint16(0)
+	tunnelOrdered := false
 	dc, err := pc.CreateDataChannel("tunnel", &webrtc.DataChannelInit{
-		Negotiated:     &neg,
-		ID:             &id,
-		Ordered:        &unordered,
-		MaxRetransmits: &maxRetransmits,
+		Negotiated: &neg,
+		ID:         &id,
+		Ordered:    &tunnelOrdered,
 	})
 	if err != nil {
 		pc.Close()
@@ -274,9 +279,21 @@ func (s *TunnelSession) sendDCFrame(connID uint32, mt byte, payload []byte) {
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	log.Printf("[dc] CONNECT %d -> %s", connID, addr)
+
+	// Reject unroutable IPv6 destinations before we try to dial them — these
+	// always fail with "invalid argument" on the VPS and waste a 10 s dial timeout.
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+				s.sendDCFrame(connID, MsgConnectErr, []byte("unroutable address"))
+				return
+			}
+		}
+	}
+
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		log.Printf("[dc] CONNECT %d failed: %v", connID, addr)
+		log.Printf("[dc] CONNECT %d failed: %v", connID, err)
 		s.sendDCFrame(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
