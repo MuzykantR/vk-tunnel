@@ -137,6 +137,14 @@ func (j *Joiner) ICEBypassIPs() []string {
 	return ICEBypassIPs(j.pc)
 }
 
+// ICEPairUsesRelay reports whether the active nominated pair includes TURN.
+func (j *Joiner) ICEPairUsesRelay() bool {
+	if j.pc == nil {
+		return false
+	}
+	return SelectedICEPairUsesRelay(j.pc)
+}
+
 // SetOnNewBypassIP registers a callback invoked the moment a new remote ICE
 // candidate IP becomes known. The caller is expected to install a /32 bypass
 // route synchronously so the IP never traverses the tunnel. Safe to call once
@@ -396,6 +404,7 @@ func (j *Joiner) initPC() {
 				logx.L("joiner", "first ICE connected")
 			}
 			j.mu.Unlock()
+			LogGatheredICECandidates(j.pc, "joiner")
 			ScheduleICEPairLogging(j.pc, "joiner")
 			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
@@ -507,6 +516,10 @@ func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
 			}
 			if j.vp8Tunnel != nil && j.vp8Tunnel.SendQueueDepth() > 0 {
 				logx.Warn("tunnel", "watchdog: missed pongs but VP8 send queue busy — ICE restart suppressed")
+				return
+			}
+			if j.pc != nil && SelectedICEPairUsesRelay(j.pc) {
+				logx.Warn("tunnel", "watchdog: missed pongs on TURN relay path — ICE restart suppressed (restart rarely fixes relay)")
 				return
 			}
 			logx.Warn("tunnel", "watchdog unhealthy — ICE restart")

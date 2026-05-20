@@ -208,6 +208,19 @@ func ICEBypassIPs() []string {
 	return activeJoiner.ICEBypassIPs()
 }
 
+// ICEPairUsesRelay reports whether the nominated ICE pair uses TURN.
+func ICEPairUsesRelay() bool {
+	if activeJoiner == nil {
+		return false
+	}
+	return activeJoiner.ICEPairUsesRelay()
+}
+
+// ICERelayAcceptanceWait is how long we wait for a direct pair before allowing redirect on relay.
+func ICERelayAcceptanceWait() time.Duration {
+	return webrtc.RelayAcceptanceMinWait()
+}
+
 // WaitICEConnected blocks until ICE is connected/completed or ctx expires.
 func WaitICEConnected(ctx context.Context) error {
 	for {

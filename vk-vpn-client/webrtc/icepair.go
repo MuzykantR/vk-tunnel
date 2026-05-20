@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -82,7 +83,14 @@ func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
 		view.loc.IP, view.rem.IP)
 	relay := locT == "relay" || remT == "relay"
 	if relay {
-		logx.Warn(tag, "ICE path uses relay (TURN) — try longer VK_VPN_ICE_RELAY_WAIT or check bypass routes for direct/srflx")
+		side := "remote"
+		if locT == "relay" {
+			side = "local"
+		}
+		logx.Warn(tag, "ICE uses TURN relay (%s side) %s -> %s; slower than host/srflx — increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass",
+			side, view.loc.IP, view.rem.IP)
+	} else {
+		logx.L(tag, "ICE direct path (no TURN relay in nominated pair)")
 	}
 	return relay
 }
@@ -110,6 +118,47 @@ func ICEBypassIPs(pc *pion.PeerConnection) []string {
 		ips = append(ips, ip)
 	}
 	return ips
+}
+
+// SelectedICEPairUsesRelay reports whether the nominated pair includes a TURN relay candidate.
+func SelectedICEPairUsesRelay(pc *pion.PeerConnection) bool {
+	view, ok := selectedICECandidatePair(pc)
+	if !ok {
+		return false
+	}
+	locT := shortType(view.loc.CandidateType)
+	remT := shortType(view.rem.CandidateType)
+	return locT == "relay" || remT == "relay"
+}
+
+// LogGatheredICECandidates logs candidate types from GetStats (diagnostics).
+func LogGatheredICECandidates(pc *pion.PeerConnection, tag string) {
+	if pc == nil {
+		return
+	}
+	seen := make(map[string]struct{})
+	var entries []string
+	for _, stat := range pc.GetStats() {
+		c, ok := stat.(pion.ICECandidateStats)
+		if !ok || c.IP == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s|%s", c.IP, shortType(c.CandidateType))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		turn := ""
+		if c.URL != "" {
+			turn = " turn=" + c.URL
+		}
+		entries = append(entries, fmt.Sprintf("%s/%s:%d@%s%s", shortType(c.CandidateType), c.Protocol, c.Port, c.IP, turn))
+	}
+	if len(entries) == 0 {
+		logx.Debug(tag, "ICE candidate stats empty (may appear after nomination)")
+		return
+	}
+	logx.L(tag, "ICE candidates in stats: %s", strings.Join(entries, " "))
 }
 
 // SelectedICEPairIPs returns local and remote IPv4 of the nominated succeeded pair.

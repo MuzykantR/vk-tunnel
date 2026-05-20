@@ -201,7 +201,7 @@ func (a *App) Disconnect() {
 // If redirect breaks ICE, split routes are removed and we retry once after reconnect.
 func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(string)) error {
 	const maxAttempts = 2
-	pairCtx, pairCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	pairCtx, pairCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer pairCancel()
 	if err := a.waitICEPairIPs(pairCtx); err != nil {
 		return fmt.Errorf("ICE pair IPs not ready: %w", err)
@@ -249,13 +249,24 @@ func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(stri
 
 func (a *App) waitICEPairIPs(ctx context.Context) error {
 	start := time.Now()
+	preferDirect := clientAPI.ICERelayAcceptanceWait() + 2*time.Second
 	for {
 		if ips := clientAPI.ICEBypassIPs(); len(ips) > 0 {
-			log.Printf("ICE bypass IPs from stats: %v", ips)
-			return nil
+			elapsed := time.Since(start)
+			if clientAPI.ICEPairUsesRelay() && elapsed < preferDirect {
+				log.Printf("ICE on TURN relay — waiting up to %s for direct host/srflx (elapsed %s, bypass %v)",
+					(preferDirect - elapsed).Round(time.Second), elapsed.Round(time.Second), ips)
+			} else {
+				if clientAPI.ICEPairUsesRelay() {
+					log.Printf("ICE bypass via TURN relay (no direct pair in %s): %v", elapsed.Round(time.Second), ips)
+				} else {
+					log.Printf("ICE bypass IPs (direct path, %s): %v", elapsed.Round(time.Second), ips)
+				}
+				return nil
+			}
 		}
-		if clientAPI.IsICEConnected() && time.Since(start) >= 3*time.Second {
-			log.Println("ICE connected 3s — redirect with candidate bypass (stats may still be empty)")
+		if clientAPI.IsICEConnected() && time.Since(start) >= preferDirect {
+			log.Printf("ICE connected %s — redirect (pair stats still empty)", preferDirect.Round(time.Second))
 			return nil
 		}
 		select {
