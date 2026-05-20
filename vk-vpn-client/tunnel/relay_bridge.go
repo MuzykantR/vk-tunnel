@@ -17,6 +17,12 @@ type udpClient struct {
 	socksHdr   []byte
 }
 
+type relayTCP struct {
+	conn net.Conn
+	addr string
+	rx   int64
+}
+
 type RelayBridge struct {
 	tunnel     DataTunnel
 	conns      sync.Map
@@ -146,9 +152,25 @@ func (rb *RelayBridge) handleJoinerMessage(connID uint32, msgType byte, payload 
 	}
 }
 
+func (rb *RelayBridge) creatorTCPCount() int {
+	n := 0
+	rb.conns.Range(func(_, val any) bool {
+		if _, ok := val.(*relayTCP); ok {
+			n++
+		}
+		return true
+	})
+	return n
+}
+
 func (rb *RelayBridge) handleCreatorMessage(connID uint32, msgType byte, payload []byte) {
 	switch msgType {
 	case MsgConnect:
+		if lim := RelayConnectLimitFromEnv(); lim > 0 && rb.creatorTCPCount() >= lim {
+			rb.logFn("relay: connect limit %d, reject id=%d %s", lim, connID, payload)
+			rb.send(connID, MsgConnectErr, []byte("parallel connect limit"))
+			return
+		}
 		go rb.connectTCP(connID, string(payload))
 	case MsgUDP:
 		go rb.handleUDP(connID, payload)
@@ -157,12 +179,17 @@ func (rb *RelayBridge) handleCreatorMessage(connID uint32, msgType byte, payload
 		if !ok {
 			return
 		}
-		if c, ok := val.(net.Conn); ok {
+		if rc, ok := val.(*relayTCP); ok {
+			rc.conn.Write(payload)
+		} else if c, ok := val.(net.Conn); ok {
 			c.Write(payload)
 		}
 	case MsgClose:
 		if val, ok := rb.conns.LoadAndDelete(connID); ok {
-			if c, ok := val.(net.Conn); ok {
+			if rc, ok := val.(*relayTCP); ok {
+				rc.conn.Close()
+				logx.DCClose(connID, rc.addr, 0, rc.rx)
+			} else if c, ok := val.(net.Conn); ok {
 				c.Close()
 			}
 		}
@@ -206,24 +233,33 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 		return
 	}
 	logx.DCOpen(connID, addr)
-	rb.conns.Store(connID, conn)
+	rc := &relayTCP{conn: conn, addr: addr}
+	rb.conns.Store(connID, rc)
 	rb.send(connID, MsgConnectOK, nil)
 
-	var tx, rx int64
 	buf := make([]byte, rb.readBuf)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			rx += int64(n)
+			rc.rx += int64(n)
 			rb.send(connID, MsgData, buf[:n])
 		}
 		if err != nil {
 			break
 		}
 	}
+
+	pending := WaitOutboundDrain(rb.tunnel, RelayDrainTimeoutFromEnv())
+	if pending > 0 {
+		rb.logFn("relay: close id=%d %s rx=%d vp8_pending=%d (drain timeout)", connID, addr, rc.rx, pending)
+	} else if _, ok := rb.tunnel.(OutboundQueued); ok {
+		rb.logFn("relay: close id=%d %s rx=%d vp8_pending=0 flushed=1", connID, addr, rc.rx)
+	}
+
 	rb.send(connID, MsgClose, nil)
+	rc.conn.Close()
 	rb.conns.Delete(connID)
-	logx.DCClose(connID, addr, tx, rx)
+	logx.DCClose(connID, addr, 0, rc.rx)
 }
 
 type socksConn struct {
@@ -245,7 +281,11 @@ func (rb *RelayBridge) Close() {
 		ln.Close()
 	}
 	rb.conns.Range(func(key, value any) bool {
+		id, _ := key.(uint32)
 		switch v := value.(type) {
+		case *relayTCP:
+			v.conn.Close()
+			logx.DCClose(id, v.addr, 0, v.rx)
 		case net.Conn:
 			v.Close()
 		case *socksConn:
