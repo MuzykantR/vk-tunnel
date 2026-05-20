@@ -7,12 +7,14 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // CallSession holds a VK call that can be rejoined without calls.start (whitelist-bypass model).
 type CallSession struct {
 	VKJoinLink string
 	OKJoinLink string
+	StartedAt  time.Time
 }
 
 // RejoinConversation re-authenticates and joins the same OK join token, returning a fresh WS URL.

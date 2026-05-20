@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	DefaultVP8FPS   = 24
-	DefaultVP8Batch = 30
-	vp8SendQueue    = 1024
+	DefaultVP8FPS          = 24
+	DefaultVP8Batch        = 30
+	keepaliveIdlePeriod    = 100 * time.Millisecond
+	vp8SendQueue           = 1024
 )
 
 // VP8DataTunnel sends framed SOCKS data over a VP8 video track (whitelist-bypass).
@@ -28,6 +29,8 @@ type VP8DataTunnel struct {
 	cfgMu     sync.Mutex
 	fps       int
 	batch     int
+	sentFrames atomic.Uint64
+	recvFrames atomic.Uint64
 	OnData    func([]byte)
 	OnClose   func()
 }
@@ -59,12 +62,17 @@ func (t *VP8DataTunnel) Reconfigure(fps, batch int) {
 		t.batch = batch
 		changed = true
 	}
+	newFPS, newBatch := t.fps, t.batch
 	t.cfgMu.Unlock()
-	if changed {
-		select {
-		case t.cfgChan <- struct{}{}:
-		default:
-		}
+	if !changed {
+		return
+	}
+	if t.logFn != nil {
+		t.logFn("vp8: reconfigure fps=%d batch=%d", newFPS, newBatch)
+	}
+	select {
+	case t.cfgChan <- struct{}{}:
+	default:
 	}
 }
 
@@ -90,8 +98,8 @@ func (t *VP8DataTunnel) SendData(data []byte) {
 	}
 }
 
-func (t *VP8DataTunnel) SetOnData(fn func([]byte))  { t.OnData = fn }
-func (t *VP8DataTunnel) SetOnClose(fn func())       { t.OnClose = fn }
+func (t *VP8DataTunnel) SetOnData(fn func([]byte)) { t.OnData = fn }
+func (t *VP8DataTunnel) SetOnClose(fn func())      { t.OnClose = fn }
 
 func (t *VP8DataTunnel) Start(fps, batch int) {
 	t.cfgMu.Lock()
@@ -118,39 +126,39 @@ func (t *VP8DataTunnel) Stop() {
 	}
 }
 
-func (t *VP8DataTunnel) HandleFrame(frame []byte) {
-	if t.obf == nil {
-		if len(frame) > 0 && t.OnData != nil {
-			t.OnData(frame)
-		}
-		return
+func (t *VP8DataTunnel) currentIntervals() (sampleInterval time.Duration, keepaliveEvery, fps, batch int) {
+	t.cfgMu.Lock()
+	fps = t.fps
+	batch = t.batch
+	t.cfgMu.Unlock()
+
+	frameInterval := time.Second / time.Duration(fps)
+	sampleInterval = frameInterval
+	if batch > 1 {
+		sampleInterval = frameInterval / time.Duration(batch)
 	}
-	res := t.obf.Decode(frame)
-	if !res.HasFrame || res.SelfEcho || res.Keepalive || len(res.Payload) == 0 {
-		return
+	if sampleInterval <= 0 {
+		sampleInterval = time.Millisecond
 	}
-	if t.OnData != nil {
-		t.OnData(res.Payload)
+	keepaliveEvery = int(keepaliveIdlePeriod / sampleInterval)
+	if keepaliveEvery < 1 {
+		keepaliveEvery = 1
 	}
+	return
 }
 
 func (t *VP8DataTunnel) writerLoop() {
-	const keepaliveEvery = 10
 	for {
-		t.cfgMu.Lock()
-		fps, batch := t.fps, t.batch
-		t.cfgMu.Unlock()
-		frameInterval := time.Second / time.Duration(fps)
-		sampleInterval := frameInterval
-		if batch > 1 {
-			sampleInterval = frameInterval / time.Duration(batch)
+		sampleInterval, keepaliveEvery, fps, batch := t.currentIntervals()
+		if t.logFn != nil {
+			t.logFn("vp8: writer fps=%d batch=%d interval=%s keepaliveEvery=%d",
+				fps, batch, sampleInterval, keepaliveEvery)
 		}
-		if sampleInterval <= 0 {
-			sampleInterval = time.Millisecond
-		}
+
 		ticker := time.NewTicker(sampleInterval)
-		idle := 0
+		idleTicks := 0
 		reconfigure := false
+
 		for !reconfigure {
 			select {
 			case <-t.stopCh:
@@ -167,13 +175,13 @@ func (t *VP8DataTunnel) writerLoop() {
 					} else {
 						sample = data
 					}
-					idle = 0
+					idleTicks = 0
 				default:
-					idle++
-					if idle < keepaliveEvery {
+					idleTicks++
+					if idleTicks < keepaliveEvery {
 						continue
 					}
-					idle = 0
+					idleTicks = 0
 					if t.obf != nil {
 						sample = t.obf.EncodeKeepalive()
 					}
@@ -181,9 +189,44 @@ func (t *VP8DataTunnel) writerLoop() {
 				if len(sample) == 0 {
 					continue
 				}
-				_ = t.track.WriteSample(media.Sample{Data: sample, Duration: sampleInterval})
+				if err := t.track.WriteSample(media.Sample{Data: sample, Duration: sampleInterval}); err != nil {
+					if t.logFn != nil {
+						t.logFn("vp8: WriteSample: %v", err)
+					}
+					continue
+				}
+				n := t.sentFrames.Add(1)
+				if t.logFn != nil && (n <= 5 || n%500 == 0) {
+					t.logFn("vp8: sent #%d %d bytes", n, len(sample))
+				}
 			}
 		}
 		ticker.Stop()
+	}
+}
+
+func (t *VP8DataTunnel) HandleFrame(frame []byte) {
+	if t.obf == nil {
+		if len(frame) > 0 && t.OnData != nil {
+			t.OnData(frame)
+		}
+		return
+	}
+	res := t.obf.Decode(frame)
+	if !res.HasFrame || res.SelfEcho {
+		return
+	}
+	if res.PeerRestart && t.logFn != nil {
+		t.logFn("vp8: peer restart epoch=0x%08x", res.PeerEpoch)
+	}
+	if res.Keepalive || len(res.Payload) == 0 {
+		return
+	}
+	n := t.recvFrames.Add(1)
+	if t.logFn != nil && (n <= 5 || n%500 == 0) {
+		t.logFn("vp8: recv #%d %d bytes", n, len(res.Payload))
+	}
+	if t.OnData != nil {
+		t.OnData(res.Payload)
 	}
 }

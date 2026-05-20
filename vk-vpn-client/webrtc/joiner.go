@@ -344,6 +344,7 @@ func (j *Joiner) initPC() {
 	// Skip per-packet SCTP checksum — pion supports this opt-in for ~10%
 	// CPU / latency win and DTLS already authenticates every frame.
 	se.EnableSCTPZeroChecksum(true)
+	ApplyICEPerformanceSettings(&se)
 
 	me := &webrtc.MediaEngine{}
 	me.RegisterDefaultCodecs()
@@ -501,9 +502,11 @@ func (j *Joiner) startVideoTunnel() {
 		return
 	}
 	log.Println("Joiner: === VP8 TUNNEL CONNECTED ===")
-	j.vp8Tunnel = tunnel.NewVP8DataTunnel(j.sampleTrack, j.obf, log.Printf)
-	j.vp8Tunnel.Start(tunnel.DefaultVP8FPS, tunnel.DefaultVP8Batch)
+	fps, batch := VP8PacingFromEnv()
+	j.vp8Tunnel = tunnel.NewVP8DataTunnel(j.sampleTrack, j.obf, logx.TagPrintf("vp8"))
+	j.vp8Tunnel.Start(fps, batch)
 	j.vp8Tunnel.SendData(tunnel.EncodeVP8Config(j.vp8Tunnel.FPS(), j.vp8Tunnel.Batch()))
+	logx.L("joiner", "VP8 pacing fps=%d batch=%d (~%d kbps target)", fps, batch, fps*batch*1126*8/1000)
 	j.attachRelay(j.vp8Tunnel)
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/vk-vpn/server/api"
 	"github.com/vk-vpn/server/config"
@@ -24,6 +25,7 @@ func main() {
 	customReadBuf := flag.Int("read-buf", 0, "TCP/DC read buffer with --resources custom")
 	customMaxDCBuf := flag.Int("max-dc-buf", 0, "DC BufferedAmount threshold with --resources custom")
 	customMemLimit := flag.Int64("mem-limit", 0, "Go soft memory limit with --resources custom")
+	callTTL := flag.Duration("call-ttl", 2*time.Hour, "Rotate VK call after this duration (roadmap antifraud)")
 	flag.Parse()
 
 	resProfile := creator.ParseResources(*resources, *customReadBuf, *customMaxDCBuf, *customMemLimit)
@@ -36,7 +38,7 @@ func main() {
 	}
 
 	// Initialize the main VPN Creator Daemon
-	vpnDaemon := daemon.NewDaemon(cookies, resProfile)
+	vpnDaemon := daemon.NewDaemon(cookies, resProfile, *callTTL)
 
 	// Create root context to handle graceful shutdown (Ctrl+C)
 	ctx, cancel := context.WithCancel(context.Background())

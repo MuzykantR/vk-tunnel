@@ -18,13 +18,18 @@ type Daemon struct {
 	currentLink  string
 	serverPubKey string
 	resources    creator.ResourceProfile
+	callTTL      time.Duration
 }
 
-func NewDaemon(cookies []config.CookieInfo, resources creator.ResourceProfile) *Daemon {
+func NewDaemon(cookies []config.CookieInfo, resources creator.ResourceProfile, callTTL time.Duration) *Daemon {
+	if callTTL <= 0 {
+		callTTL = 2 * time.Hour
+	}
 	return &Daemon{
 		cookies:      cookies,
 		serverPubKey: "mock_public_key_ed25519",
 		resources:    resources,
+		callTTL:      callTTL,
 	}
 }
 
@@ -66,9 +71,14 @@ func (d *Daemon) Start(ctx context.Context) {
 				sleep(ctx, 3*time.Second)
 				continue
 			}
-			call = &signaling.CallSession{VKJoinLink: vkLink, OKJoinLink: okJoin}
+			call = &signaling.CallSession{VKJoinLink: vkLink, OKJoinLink: okJoin, StartedAt: time.Now()}
 			d.setLinkInfo(vkLink)
-			log.Printf("New Call created! Active link: %s", vkLink)
+			log.Printf("New Call created! Active link: %s (TTL %s)", vkLink, d.callTTL)
+		} else if time.Since(call.StartedAt) >= d.callTTL {
+			log.Printf("Call TTL %s reached — rotating to new calls.start", d.callTTL)
+			call = nil
+			vkSig.Close()
+			continue
 		} else {
 			log.Println("Rejoining existing call (no calls.start)...")
 			var err error
