@@ -58,6 +58,9 @@ type Joiner struct {
 	mu            sync.Mutex
 	closeOnce     sync.Once
 	iceStableReached atomic.Bool
+	iceStableWaitGen atomic.Uint32
+	defaultRouteReady atomic.Bool
+	defaultRouteAt    time.Time
 	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
 	iceRestartMu  sync.Mutex
 	iceRestarting bool
@@ -106,6 +109,24 @@ func (j *Joiner) Ready() <-chan struct{} { return j.readyCh }
 // flow is established on the physical adapter and routing-table changes are
 // safe to apply.
 func (j *Joiner) IceStable() <-chan struct{} { return j.iceStableCh }
+
+// IsICEConnected reports whether the peer connection ICE agent is connected or completed.
+func (j *Joiner) IsICEConnected() bool {
+	if j.pc == nil {
+		return false
+	}
+	st := j.pc.ICEConnectionState()
+	return st == webrtc.ICEConnectionStateConnected || st == webrtc.ICEConnectionStateCompleted
+}
+
+// SetDefaultRouteReady marks that split default routes are installed; the tunnel
+// watchdog and ICE-restart suppression treat post-redirect recovery differently.
+func (j *Joiner) SetDefaultRouteReady() {
+	j.defaultRouteReady.Store(true)
+	j.mu.Lock()
+	j.defaultRouteAt = time.Now()
+	j.mu.Unlock()
+}
 
 // SetOnNewBypassIP registers a callback invoked the moment a new remote ICE
 // candidate IP becomes known. The caller is expected to install a /32 bypass
@@ -472,6 +493,9 @@ func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
 		Interval: 10 * time.Second,
 		MaxMiss:  3,
 		OnUnhealthy: func() {
+			if !j.defaultRouteReady.Load() {
+				return
+			}
 			logx.Warn("tunnel", "watchdog unhealthy — ICE restart")
 			go j.requestICERestart()
 		},
@@ -581,13 +605,10 @@ func (j *Joiner) onTransmittedData(data map[string]interface{}) {
 			}
 			j.pendingICE = nil
 		} else if sdpType == "offer" {
-			// Accept the offer only when we are in a state that allows it:
-			//   - first offer ever (initial negotiation)
-			//   - remote-initiated ICE restart while we're in Stable
-			// Reject duplicate offers during early negotiation (some VK SFU paths
-			// retransmit the offer multiple times, which would cause ICE restarts).
 			sigState := j.pc.SignalingState()
-			if j.answerSent && sigState != webrtc.SignalingStateStable {
+			if sigState == webrtc.SignalingStateHaveLocalOffer {
+				log.Println("Remote offer while local offer pending — accepting remote (ICE restart / rejoin)")
+			} else if j.answerSent && sigState != webrtc.SignalingStateStable {
 				log.Println("Ignoring duplicate offer (answer already sent, not in stable)")
 				return
 			}
@@ -755,16 +776,20 @@ func (j *Joiner) Close() {
 	})
 }
 
-// maybeMarkICEStable closes iceStableCh after the agent has stayed
-// in connected/completed for 1 s. If state flips back during the wait
-// the closure is skipped — caller will retry on next state change.
+// maybeMarkICEStable closes iceStableCh after ICE stays connected/completed
+// for 5s. A newer connected event bumps iceStableWaitGen so stale timers exit.
 func (j *Joiner) maybeMarkICEStable() {
-	timer := time.NewTimer(3 * time.Second)
+	gen := j.iceStableWaitGen.Add(1)
+	const stableDur = 5 * time.Second
+	timer := time.NewTimer(stableDur)
 	defer timer.Stop()
 	select {
 	case <-j.ctx.Done():
 		return
 	case <-timer.C:
+	}
+	if j.iceStableWaitGen.Load() != gen {
+		return
 	}
 	if j.pc == nil {
 		return
@@ -775,7 +800,7 @@ func (j *Joiner) maybeMarkICEStable() {
 	}
 	j.iceStableOnce.Do(func() {
 		j.iceStableReached.Store(true)
-		log.Println("ICE stable for 3s — safe to redirect default route")
+		log.Printf("ICE stable for %s — safe to redirect default route", stableDur)
 		close(j.iceStableCh)
 	})
 }
@@ -824,7 +849,16 @@ func (j *Joiner) requestICERestart() {
 		log.Println("ICE restart: suppressed (never connected)")
 		return
 	}
-	if time.Since(first) < 45*time.Second {
+	allowEarly := false
+	if j.defaultRouteReady.Load() {
+		j.mu.Lock()
+		sinceRoute := time.Since(j.defaultRouteAt)
+		j.mu.Unlock()
+		if sinceRoute < 2*time.Minute {
+			allowEarly = true
+		}
+	}
+	if !allowEarly && time.Since(first) < 45*time.Second {
 		log.Printf("ICE restart: suppressed (within 45s of first connect, elapsed=%s)", time.Since(first).Round(time.Second))
 		return
 	}
@@ -846,8 +880,13 @@ func (j *Joiner) requestICERestart() {
 		log.Println("ICE restart: no peer or PC, skipping")
 		return
 	}
-	if j.pc.SignalingState() != webrtc.SignalingStateStable {
-		log.Printf("ICE restart: signaling state %s != stable, skipping", j.pc.SignalingState().String())
+	sig := j.pc.SignalingState()
+	if sig != webrtc.SignalingStateStable && sig != webrtc.SignalingStateHaveLocalOffer {
+		log.Printf("ICE restart: signaling state %s, skipping", sig.String())
+		return
+	}
+	if sig == webrtc.SignalingStateHaveLocalOffer {
+		log.Println("ICE restart: waiting for remote answer or offer (have-local-offer)")
 		return
 	}
 	offer, err := j.pc.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
