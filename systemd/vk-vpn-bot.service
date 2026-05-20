@@ -6,10 +6,9 @@ After=network.target vk-vpn-daemon.service
 Type=simple
 User=root
 WorkingDirectory=/opt/vk-vpn/vk-vpn-bot
-EnvironmentFile=-/opt/vk-vpn/vk-vpn-bot/.env
 ExecStart=/opt/vk-vpn/vk-vpn-bot/venv/bin/python bot.py
-Restart=on-failure
-RestartSec=15
+Restart=always
+RestartSec=3
 StandardOutput=journal
 StandardError=journal
 

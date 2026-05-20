@@ -47,48 +47,30 @@ async def _fetch_link_from_daemon():
     return None, None, "таймаут ожидания ссылки от демона"
 
 
-@router.message(Command("id"))
-async def cmd_id(message: types.Message):
-    """Показывает Telegram user_id для WHITELIST_IDS (без whitelist)."""
-    uid = message.from_user.id
-    allowed = uid in WHITELIST_IDS
-    await message.answer(
-        f"Ваш Telegram user_id: {uid}\n"
-        f"В whitelist: {'да' if allowed else 'нет'}\n"
-        f"Записей в whitelist: {len(WHITELIST_IDS)}"
-    )
-
-
 @router.message(Command(commands=["start", "get_link"]))
 async def cmd_get_link(message: types.Message):
-    uid = message.from_user.id
-    if uid not in WHITELIST_IDS:
-        logger.warning("ignored /get_link from user_id=%s (not in whitelist)", uid)
-        await message.answer(
-            f"⛔ Доступ запрещён (user_id {uid} не в WHITELIST_IDS).\n"
-            f"Отправьте /id — скопируйте число в .env бота."
-        )
-        return
+    # Whitelist check
+    if message.from_user.id not in WHITELIST_IDS:
+        logger.info("ignored /get_link from non-whitelist user_id=%s", message.from_user.id)
+        return  # Silent drop (looks like «бот молчит»)
 
     link, server_pk, err = await _fetch_link_from_daemon()
     if err:
         await message.answer(f"❌ {err}")
         return
 
+    # Encrypt
     try:
         uri = encrypt_link_payload(link, server_pk)
     except Exception as e:
-        logger.exception("encrypt failed")
         await message.answer(f"❌ Ошибка шифрования: {e}")
         return
 
+    # Send success response
     text = (
-        "🟢 VPN-туннель готов. Скопируйте ссылку в vk-client:\n\n"
-        f"{uri}"
+        "🟢 Ваш защищенный VPN-туннель готов.\n"
+        "Нажмите на ссылку ниже, чтобы подключиться:\n\n"
+        f"`{uri}`"
     )
-    try:
-        # Без Markdown: в myvpn:// много '_' — Telegram ломает разбор entities.
-        await message.answer(text)
-    except Exception as e:
-        logger.exception("telegram send failed")
-        await message.answer(f"❌ Не удалось отправить сообщение в Telegram: {e}")
+    
+    await message.answer(text, parse_mode="Markdown")
