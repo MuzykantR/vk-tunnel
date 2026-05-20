@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"net"
 	"strings"
 	"time"
 
@@ -49,6 +50,48 @@ func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
 	}
 	logx.Warn(tag, "ICE pair: no succeeded pair in stats yet")
 	return false
+}
+
+// ICEBypassIPs collects every public IPv4 from ICE stats (candidates + succeeded pairs).
+func ICEBypassIPs(pc *pion.PeerConnection) []string {
+	if pc == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var ips []string
+	add := func(ip string) {
+		p := net.ParseIP(ip)
+		if p == nil || p.To4() == nil {
+			return
+		}
+		if p.IsLoopback() || p.IsLinkLocalUnicast() || p.IsPrivate() {
+			return
+		}
+		if _, ok := seen[ip]; ok {
+			return
+		}
+		seen[ip] = struct{}{}
+		ips = append(ips, ip)
+	}
+	cands := make(map[string]pion.ICECandidateStats)
+	for _, stat := range pc.GetStats() {
+		switch s := stat.(type) {
+		case pion.ICECandidateStats:
+			cands[s.ID] = s
+			add(s.IP)
+		case pion.ICECandidatePairStats:
+			if s.State != pion.StatsICECandidatePairStateSucceeded {
+				continue
+			}
+			if loc, ok := cands[s.LocalCandidateID]; ok {
+				add(loc.IP)
+			}
+			if rem, ok := cands[s.RemoteCandidateID]; ok {
+				add(rem.IP)
+			}
+		}
+	}
+	return ips
 }
 
 // SelectedICEPairIPs returns local and remote IPv4 of the nominated succeeded pair.

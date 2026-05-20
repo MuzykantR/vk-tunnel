@@ -143,10 +143,10 @@ func (rb *RelayBridge) handleJoinerMessage(connID uint32, msgType byte, payload 
 		default:
 		}
 	case MsgData:
+		sc.lastDataNs.Store(time.Now().UnixNano())
 		sc.conn.Write(payload)
 	case MsgClose:
-		sc.conn.Close()
-		rb.conns.Delete(connID)
+		go rb.closeJoinerAfterInboundDrain(sc, connID)
 	case MsgPing, MsgPong:
 		// handled at control connID
 	}
@@ -225,6 +225,24 @@ func (rb *RelayBridge) handleUDP(connID uint32, payload []byte) {
 	rb.send(connID, MsgUDPReply, buf[:n])
 }
 
+func (rb *RelayBridge) closeJoinerAfterInboundDrain(sc *socksConn, connID uint32) {
+	grace := RelayInboundGraceFromEnv()
+	idle := RelayInboundIdleFromEnv()
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		last := sc.lastDataNs.Load()
+		if last == 0 || time.Since(time.Unix(0, last)) >= idle {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	sc.conn.Close()
+	rb.conns.Delete(connID)
+	if _, ok := rb.tunnel.(OutboundQueued); ok {
+		rb.logFn("relay: joiner close id=%d after inbound grace", connID)
+	}
+}
+
 func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
@@ -263,10 +281,11 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 }
 
 type socksConn struct {
-	id   uint32
-	conn net.Conn
-	rb   *RelayBridge
-	rdy  chan error
+	id         uint32
+	conn       net.Conn
+	rb         *RelayBridge
+	rdy        chan error
+	lastDataNs atomic.Int64
 }
 
 func (rb *RelayBridge) Close() {

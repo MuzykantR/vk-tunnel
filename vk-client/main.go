@@ -152,40 +152,19 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// WLB desktop-joiner model: redirect when the tunnel is already connected and
-	// every known ICE/signaling IP has a /32 bypass. Waiting an extra 3s+2s after
-	// connect then changing routes was breaking host/host ICE (~6s disconnect).
 	flushBypass := func(label string) {
 		for _, ip := range clientAPI.GetActiveBypassIPs() {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
-		for _, ip := range clientAPI.SelectedICEPairBypassIPs() {
+		for _, ip := range clientAPI.ICEBypassIPs() {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
 		log.Printf("Bypass routes flushed (%s)", label)
 	}
 
-	log.Println("Tunnel ready — flushing bypass before default redirect (WLB timing)")
-	flushBypass("pre-redirect")
-	time.Sleep(500 * time.Millisecond)
-	if !clientAPI.IsICEConnected() {
-		a.partialTeardown()
-		return fmt.Errorf("ICE dropped before default redirect")
-	}
-
-	log.Println("Redirecting default traffic through tunnel (WLVPN)...")
-	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
+	if err := a.installDefaultRouteWhenReady(tunName, flushBypass); err != nil {
 		a.partialTeardown()
 		return err
-	}
-	flushBypass("post-redirect")
-	clientAPI.NotifyDefaultRouteActive()
-	time.Sleep(500 * time.Millisecond)
-	if !clientAPI.IsICEConnected() {
-		log.Println("ICE lost right after default redirect — rolling back split routes")
-		wintun.CleanupRouting(tunName)
-		a.partialTeardown()
-		return fmt.Errorf("ICE disconnected immediately after route redirect (check bypass /32 for peer IP)")
 	}
 
 	a.connected = true
@@ -216,6 +195,70 @@ func (a *App) Disconnect() {
 	a.bypassSink = nil
 	a.connected = false
 	log.Println("VPN Disconnected.")
+}
+
+// installDefaultRouteWhenReady redirects only when ICE stats expose peer IPs.
+// If redirect breaks ICE, split routes are removed and we retry once after reconnect.
+func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(string)) error {
+	const maxAttempts = 2
+	pairCtx, pairCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer pairCancel()
+	if err := a.waitICEPairIPs(pairCtx); err != nil {
+		return fmt.Errorf("ICE pair IPs not ready: %w", err)
+	}
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		log.Printf("Default redirect attempt %d/%d (WLB + nominated pair bypass)", attempt, maxAttempts)
+		flushBypass("pre-redirect")
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		if !clientAPI.IsICEConnected() {
+			return fmt.Errorf("ICE dropped before default redirect")
+		}
+		if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
+			return err
+		}
+		flushBypass("post-redirect")
+		clientAPI.NotifyDefaultRouteActive()
+		time.Sleep(1 * time.Second)
+		if clientAPI.IsICEConnected() {
+			return nil
+		}
+		log.Printf("ICE lost after redirect attempt %d — rolling back split routes only", attempt)
+		wintun.DeleteSplitDefaultRoutes(tunName)
+		if attempt >= maxAttempts {
+			break
+		}
+		iceCtx, iceCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := clientAPI.WaitICEConnected(iceCtx)
+		iceCancel()
+		if err != nil {
+			return fmt.Errorf("ICE did not recover after redirect rollback: %w", err)
+		}
+		log.Println("ICE recovered — retrying default redirect with updated pair stats")
+	}
+	return fmt.Errorf("ICE unstable after %d redirect attempts", maxAttempts)
+}
+
+func (a *App) waitICEPairIPs(ctx context.Context) error {
+	start := time.Now()
+	for {
+		if ips := clientAPI.ICEBypassIPs(); len(ips) > 0 {
+			log.Printf("ICE bypass IPs from stats: %v", ips)
+			return nil
+		}
+		if clientAPI.IsICEConnected() && time.Since(start) >= 3*time.Second {
+			log.Println("ICE connected 3s — redirect with candidate bypass (stats may still be empty)")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+		if !clientAPI.IsICEConnected() {
+			return fmt.Errorf("ICE not connected while waiting for pair IPs")
+		}
+	}
 }
 
 // partialTeardown is the recovery path used when Connect bails out mid-way.

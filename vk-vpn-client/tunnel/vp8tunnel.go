@@ -95,9 +95,14 @@ func (t *VP8DataTunnel) SendData(data []byte) {
 	}
 	payload := make([]byte, len(data))
 	copy(payload, data)
-	select {
-	case t.sendQueue <- payload:
-	case <-t.stopCh:
+	// Block until queued — backpressure for relay TCP reads (never silently drop).
+	for {
+		select {
+		case t.sendQueue <- payload:
+			return
+		case <-t.stopCh:
+			return
+		}
 	}
 }
 

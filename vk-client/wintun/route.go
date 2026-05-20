@@ -140,6 +140,18 @@ func RedirectDefaultTraffic(adapterName string) error {
 	return nil
 }
 
+// DeleteSplitDefaultRoutes removes only the 0.0.0.0/1 + 128.0.0.0/1 TUN routes.
+// Bypass /32 routes stay so ICE can recover on the physical gateway.
+func DeleteSplitDefaultRoutes(adapterName string) {
+	if adapterName == "" {
+		adapterName = "WLVPN"
+	}
+	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		runNetsh("interface", "ipv4", "delete", "route",
+			"prefix="+prefix, "interface="+adapterName)
+	}
+}
+
 // CleanupRouting removes split default routes AND every bypass route that was installed
 // during this session. Critical for preventing stale state between VPN restarts.
 func CleanupRouting(adapterName string) {

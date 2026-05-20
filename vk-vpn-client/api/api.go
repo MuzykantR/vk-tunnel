@@ -200,12 +200,26 @@ func NotifyDefaultRouteActive() {
 	}
 }
 
-// SelectedICEPairBypassIPs returns local+remote IPs of the nominated ICE pair for /32 bypass.
-func SelectedICEPairBypassIPs() []string {
+// ICEBypassIPs returns ICE candidate / pair IPs for /32 bypass before redirect.
+func ICEBypassIPs() []string {
 	if activeJoiner == nil {
 		return nil
 	}
-	return activeJoiner.SelectedICEPairBypassIPs()
+	return activeJoiner.ICEBypassIPs()
+}
+
+// WaitICEConnected blocks until ICE is connected/completed or ctx expires.
+func WaitICEConnected(ctx context.Context) error {
+	for {
+		if activeJoiner != nil && activeJoiner.IsICEConnected() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // IceStable returns a channel that closes the first time the active joiner's

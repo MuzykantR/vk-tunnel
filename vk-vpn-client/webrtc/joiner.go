@@ -129,24 +129,12 @@ func (j *Joiner) SetDefaultRouteReady() {
 	j.mu.Unlock()
 }
 
-// SelectedICEPairBypassIPs returns nominated pair endpoint IPs (must bypass TUN).
-func (j *Joiner) SelectedICEPairBypassIPs() []string {
+// ICEBypassIPs returns all public ICE-related IPs that must bypass the TUN.
+func (j *Joiner) ICEBypassIPs() []string {
 	if j.pc == nil {
 		return nil
 	}
-	loc, rem, ok := SelectedICEPairIPs(j.pc)
-	if !ok {
-		return nil
-	}
-	var ips []string
-	for _, ip := range []string{loc, rem} {
-		p := net.ParseIP(ip)
-		if p == nil || p.To4() == nil || isPrivateIP(p) {
-			continue
-		}
-		ips = append(ips, ip)
-	}
-	return ips
+	return ICEBypassIPs(j.pc)
 }
 
 // SetOnNewBypassIP registers a callback invoked the moment a new remote ICE
