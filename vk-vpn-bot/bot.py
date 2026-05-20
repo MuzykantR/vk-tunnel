@@ -3,6 +3,7 @@ import logging
 import socket
 import sys
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
@@ -17,27 +18,25 @@ WEBHOOK_RETRIES = 3
 WEBHOOK_RETRY_DELAY_SEC = 5
 
 
-class IPv4AiohttpSession(AiohttpSession):
-    """aiogram не принимает connector= в конструкторе — правим _connector_init."""
-
-    def __init__(self, timeout: float = 120.0) -> None:
-        super().__init__(proxy=None, timeout=timeout)
-        self._connector_init["family"] = socket.AF_INET
-
-
 def make_bot_session() -> AiohttpSession:
+    timeout = aiohttp.ClientTimeout(
+        total=TELEGRAM_TIMEOUT_SEC,
+        connect=min(60, TELEGRAM_TIMEOUT_SEC),
+        sock_connect=min(60, TELEGRAM_TIMEOUT_SEC),
+    )
     proxy = TELEGRAM_PROXY or None
-    timeout = float(TELEGRAM_TIMEOUT_SEC)
+    kwargs = {"timeout": timeout}
+    # curl у вас ушёл в IPv6; aiohttp иногда висит на IPv4 — принудительно v4.
+    if TELEGRAM_FORCE_IPV4 and not proxy:
+        kwargs["connector"] = aiohttp.TCPConnector(family=socket.AF_INET)
+        logger.info("Telegram HTTP client: IPv4 only")
     if proxy:
         logger.info("Telegram session via proxy %s", proxy.split("@")[-1])
-        return AiohttpSession(proxy=proxy, timeout=timeout)
-    if TELEGRAM_FORCE_IPV4:
-        logger.info("Telegram HTTP client: IPv4 only")
-        return IPv4AiohttpSession(timeout=timeout)
-    return AiohttpSession(timeout=timeout)
+    return AiohttpSession(proxy=proxy, **kwargs)
 
 
 async def ensure_telegram_ready(bot: Bot) -> None:
+    """getMe как ваш curl; delete_webhook опционален — polling часто и без него."""
     me = await bot.get_me(request_timeout=30)
     logger.info("Telegram API OK: @%s (id=%s)", me.username, me.id)
 
@@ -65,7 +64,7 @@ async def main() -> None:
 
     try:
         await ensure_telegram_ready(bot)
-        logger.info("Starting bot polling (session timeout=%ss)...", TELEGRAM_TIMEOUT_SEC)
+        logger.info("Starting bot polling (timeout=%ss)...", TELEGRAM_TIMEOUT_SEC)
         await dp.start_polling(bot, handle_signals=False)
     finally:
         await bot.session.close()
@@ -78,7 +77,8 @@ if __name__ == "__main__":
         logger.error(
             "Нет связи с api.telegram.org: %s\n"
             "Проверка: curl -4 -sS --max-time 15 "
-            "'https://api.telegram.org/bot<TOKEN>/getMe'",
+            "'https://api.telegram.org/bot<TOKEN>/getMe'\n"
+            "Если curl ок, а бот нет — git pull && make setup-bot && restart.",
             e,
         )
         sys.exit(1)
