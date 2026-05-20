@@ -152,25 +152,22 @@ func (a *App) Connect(uri string) error {
 		return err
 	}
 
-	// WLB model: full default route ONLY after ICE stayed connected 3s continuously.
-	// Never redirect on a timeout — that was causing disconnect exactly at +6s.
-	log.Println("Waiting for ICE to stabilize (up to 90s, no fallback)...")
-	iceCtx, iceCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer iceCancel()
-	if err := clientAPI.WaitIceStable(iceCtx); err != nil {
-		a.partialTeardown()
-		return fmt.Errorf("ICE did not stabilize: %w", err)
-	}
+	// WLB desktop-joiner model: redirect when the tunnel is already connected and
+	// every known ICE/signaling IP has a /32 bypass. Waiting an extra 3s+2s after
+	// connect then changing routes was breaking host/host ICE (~6s disconnect).
 	flushBypass := func(label string) {
 		for _, ip := range clientAPI.GetActiveBypassIPs() {
+			wintun.AddBypassRoute(ip, a.defaultGW)
+		}
+		for _, ip := range clientAPI.SelectedICEPairBypassIPs() {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
 		log.Printf("Bypass routes flushed (%s)", label)
 	}
 
-	log.Println("ICE stable — flushing bypass routes before default redirect")
+	log.Println("Tunnel ready — flushing bypass before default redirect (WLB timing)")
 	flushBypass("pre-redirect")
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 	if !clientAPI.IsICEConnected() {
 		a.partialTeardown()
 		return fmt.Errorf("ICE dropped before default redirect")
@@ -183,7 +180,7 @@ func (a *App) Connect(uri string) error {
 	}
 	flushBypass("post-redirect")
 	clientAPI.NotifyDefaultRouteActive()
-	time.Sleep(1 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 	if !clientAPI.IsICEConnected() {
 		log.Println("ICE lost right after default redirect — rolling back split routes")
 		wintun.CleanupRouting(tunName)

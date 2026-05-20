@@ -51,6 +51,30 @@ func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
 	return false
 }
 
+// SelectedICEPairIPs returns local and remote IPv4 of the nominated succeeded pair.
+func SelectedICEPairIPs(pc *pion.PeerConnection) (localIP, remoteIP string, ok bool) {
+	if pc == nil {
+		return "", "", false
+	}
+	cands := make(map[string]pion.ICECandidateStats)
+	for _, stat := range pc.GetStats() {
+		switch s := stat.(type) {
+		case pion.ICECandidateStats:
+			cands[s.ID] = s
+		case pion.ICECandidatePairStats:
+			if s.State != pion.StatsICECandidatePairStateSucceeded {
+				continue
+			}
+			loc := cands[s.LocalCandidateID]
+			rem := cands[s.RemoteCandidateID]
+			if loc.IP != "" && rem.IP != "" {
+				return loc.IP, rem.IP, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 func shortType(t pion.ICECandidateType) string {
 	s := strings.ToLower(t.String())
 	switch {

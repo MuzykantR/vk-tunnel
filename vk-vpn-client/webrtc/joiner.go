@@ -122,10 +122,31 @@ func (j *Joiner) IsICEConnected() bool {
 // SetDefaultRouteReady marks that split default routes are installed; the tunnel
 // watchdog and ICE-restart suppression treat post-redirect recovery differently.
 func (j *Joiner) SetDefaultRouteReady() {
+	j.iceStableReached.Store(true)
 	j.defaultRouteReady.Store(true)
 	j.mu.Lock()
 	j.defaultRouteAt = time.Now()
 	j.mu.Unlock()
+}
+
+// SelectedICEPairBypassIPs returns nominated pair endpoint IPs (must bypass TUN).
+func (j *Joiner) SelectedICEPairBypassIPs() []string {
+	if j.pc == nil {
+		return nil
+	}
+	loc, rem, ok := SelectedICEPairIPs(j.pc)
+	if !ok {
+		return nil
+	}
+	var ips []string
+	for _, ip := range []string{loc, rem} {
+		p := net.ParseIP(ip)
+		if p == nil || p.To4() == nil || isPrivateIP(p) {
+			continue
+		}
+		ips = append(ips, ip)
+	}
+	return ips
 }
 
 // SetOnNewBypassIP registers a callback invoked the moment a new remote ICE

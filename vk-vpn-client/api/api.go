@@ -200,6 +200,14 @@ func NotifyDefaultRouteActive() {
 	}
 }
 
+// SelectedICEPairBypassIPs returns local+remote IPs of the nominated ICE pair for /32 bypass.
+func SelectedICEPairBypassIPs() []string {
+	if activeJoiner == nil {
+		return nil
+	}
+	return activeJoiner.SelectedICEPairBypassIPs()
+}
+
 // IceStable returns a channel that closes the first time the active joiner's
 // ICE agent has been continuously connected/completed for at least 1 second.
 // Returns a closed channel if no joiner is active so callers don't block forever.
