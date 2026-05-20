@@ -32,10 +32,3 @@ try:
     TELEGRAM_TIMEOUT_SEC = max(30, int(_tg_timeout))
 except ValueError:
     TELEGRAM_TIMEOUT_SEC = 120
-
-# aiohttp по умолчанию может ходить в IPv6 иначе, чем curl (у вас curl → IPv6, POST иногда висит).
-TELEGRAM_FORCE_IPV4 = os.getenv("TELEGRAM_FORCE_IPV4", "1").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-)
