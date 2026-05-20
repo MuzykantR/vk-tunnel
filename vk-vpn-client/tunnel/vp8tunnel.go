@@ -101,26 +101,6 @@ func (t *VP8DataTunnel) SendData(data []byte) {
 	}
 }
 
-// SendQueueDepth returns queued VP8 samples not yet written to the track.
-func (t *VP8DataTunnel) SendQueueDepth() int {
-	return len(t.sendQueue)
-}
-
-// WaitSendQueueDrained waits until sendQueue is empty or timeout. Returns remaining depth.
-func (t *VP8DataTunnel) WaitSendQueueDrained(timeout time.Duration) int {
-	if timeout <= 0 {
-		return t.SendQueueDepth()
-	}
-	deadline := time.Now().Add(timeout)
-	for t.SendQueueDepth() > 0 {
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return t.SendQueueDepth()
-}
-
 func (t *VP8DataTunnel) SetOnData(fn func([]byte)) { t.OnData = fn }
 func (t *VP8DataTunnel) SetOnClose(fn func())      { t.OnClose = fn }
 
