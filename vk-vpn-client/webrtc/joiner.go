@@ -505,6 +505,10 @@ func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
 			if !j.defaultRouteReady.Load() {
 				return
 			}
+			if j.vp8Tunnel != nil && j.vp8Tunnel.SendQueueDepth() > 0 {
+				logx.Warn("tunnel", "watchdog: missed pongs but VP8 send queue busy — ICE restart suppressed")
+				return
+			}
 			logx.Warn("tunnel", "watchdog unhealthy — ICE restart")
 			go j.requestICERestart()
 		},
@@ -809,7 +813,7 @@ func (j *Joiner) maybeMarkICEStable() {
 	}
 	j.iceStableOnce.Do(func() {
 		j.iceStableReached.Store(true)
-		log.Printf("ICE stable for %s — safe to redirect default route", stableDur)
+		log.Printf("ICE held connected/completed for %s (informational; redirect may already be active)", stableDur)
 		close(j.iceStableCh)
 	})
 }

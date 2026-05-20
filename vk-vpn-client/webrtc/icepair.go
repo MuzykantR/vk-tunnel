@@ -20,40 +20,74 @@ func ScheduleICEPairLogging(pc *pion.PeerConnection, tag string) {
 	})
 }
 
-// LogSelectedICEPair logs local/remote candidate types via GetStats (P1, pion v3).
-// Returns true if either side uses relay (TURN).
-func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
+type icePairView struct {
+	loc       pion.ICECandidateStats
+	rem       pion.ICECandidateStats
+	nominated bool
+}
+
+// selectedICECandidatePair picks the nominated succeeded pair with both IPs known.
+// GetStats() order is undefined — candidate stats must be collected before pairs.
+func selectedICECandidatePair(pc *pion.PeerConnection) (icePairView, bool) {
 	if pc == nil {
-		return false
+		return icePairView{}, false
 	}
 	cands := make(map[string]pion.ICECandidateStats)
 	for _, stat := range pc.GetStats() {
-		switch s := stat.(type) {
-		case pion.ICECandidateStats:
+		if s, ok := stat.(pion.ICECandidateStats); ok {
 			cands[s.ID] = s
-		case pion.ICECandidatePairStats:
-			if s.State != pion.StatsICECandidatePairStateSucceeded {
-				continue
-			}
-			loc := cands[s.LocalCandidateID]
-			rem := cands[s.RemoteCandidateID]
-			locT := shortType(loc.CandidateType)
-			remT := shortType(rem.CandidateType)
-			logx.L(tag, "ICE selected %s/%s <-> %s/%s (%s -> %s)",
-				locT, loc.Protocol, remT, rem.Protocol, loc.IP, rem.IP)
-			relay := locT == "relay" || remT == "relay"
-			if relay {
-				logx.Warn(tag, "ICE path uses relay (TURN) — try longer VK_VPN_ICE_RELAY_WAIT or check bypass routes for direct/srflx")
-			}
-			return relay
 		}
 	}
-	logx.Warn(tag, "ICE pair: no succeeded pair in stats yet")
-	return false
+	var fallback *icePairView
+	for _, stat := range pc.GetStats() {
+		pair, ok := stat.(pion.ICECandidatePairStats)
+		if !ok || pair.State != pion.StatsICECandidatePairStateSucceeded {
+			continue
+		}
+		loc, lok := cands[pair.LocalCandidateID]
+		rem, rok := cands[pair.RemoteCandidateID]
+		if !lok || !rok || loc.IP == "" || rem.IP == "" {
+			continue
+		}
+		view := icePairView{loc: loc, rem: rem, nominated: pair.Nominated}
+		if pair.Nominated {
+			return view, true
+		}
+		if fallback == nil {
+			fallback = &view
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	return icePairView{}, false
+}
+
+// LogSelectedICEPair logs local/remote candidate types via GetStats (P1, pion v3).
+// Returns true if either side uses relay (TURN).
+func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
+	view, ok := selectedICECandidatePair(pc)
+	if !ok {
+		logx.Warn(tag, "ICE pair: no succeeded pair with IPs in stats yet")
+		return false
+	}
+	locT := shortType(view.loc.CandidateType)
+	remT := shortType(view.rem.CandidateType)
+	nom := ""
+	if view.nominated {
+		nom = " nominated"
+	}
+	logx.L(tag, "ICE selected%s %s/%s:%d <-> %s/%s:%d (%s -> %s)",
+		nom, locT, view.loc.Protocol, view.loc.Port, remT, view.rem.Protocol, view.rem.Port,
+		view.loc.IP, view.rem.IP)
+	relay := locT == "relay" || remT == "relay"
+	if relay {
+		logx.Warn(tag, "ICE path uses relay (TURN) — try longer VK_VPN_ICE_RELAY_WAIT or check bypass routes for direct/srflx")
+	}
+	return relay
 }
 
 // ICEBypassIPs returns public IPv4 of the nominated succeeded ICE pair only.
-// Avoids /32 bypass routes for every TURN/stale candidate (redirect used to break ICE).
 func ICEBypassIPs(pc *pion.PeerConnection) []string {
 	loc, rem, ok := SelectedICEPairIPs(pc)
 	if !ok {
@@ -80,26 +114,11 @@ func ICEBypassIPs(pc *pion.PeerConnection) []string {
 
 // SelectedICEPairIPs returns local and remote IPv4 of the nominated succeeded pair.
 func SelectedICEPairIPs(pc *pion.PeerConnection) (localIP, remoteIP string, ok bool) {
-	if pc == nil {
+	view, ok := selectedICECandidatePair(pc)
+	if !ok {
 		return "", "", false
 	}
-	cands := make(map[string]pion.ICECandidateStats)
-	for _, stat := range pc.GetStats() {
-		switch s := stat.(type) {
-		case pion.ICECandidateStats:
-			cands[s.ID] = s
-		case pion.ICECandidatePairStats:
-			if s.State != pion.StatsICECandidatePairStateSucceeded {
-				continue
-			}
-			loc := cands[s.LocalCandidateID]
-			rem := cands[s.RemoteCandidateID]
-			if loc.IP != "" && rem.IP != "" {
-				return loc.IP, rem.IP, true
-			}
-		}
-	}
-	return "", "", false
+	return view.loc.IP, view.rem.IP, true
 }
 
 func shortType(t pion.ICECandidateType) string {

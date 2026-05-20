@@ -79,6 +79,10 @@ func (rb *RelayBridge) send(connID uint32, msgType byte, payload []byte) {
 
 func (rb *RelayBridge) handleTunnelData(data []byte) {
 	DecodeFrames(data, func(connID uint32, msgType byte, payload []byte) {
+		// Any inbound tunnel frame means the path is alive (VP8 bulk load may delay MsgPong).
+		if rb.mode == "joiner" && rb.onPong != nil {
+			rb.onPong()
+		}
 		if connID == ControlConnID {
 			switch msgType {
 			case MsgConfig:
