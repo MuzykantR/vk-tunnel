@@ -1,0 +1,64 @@
+﻿=== vk-vpn benchmark notes ===
+Date: 2026-05-20 17:00
+Build/commit: d0bd9ab (phase 1)
+Network: [x] Wi-Fi  [ ] Ethernet  Location: home (Russia)
+
+--- Speedtest (do not swap) ---
+Without VPN: https://yandex.ru/internet/
+With VPN:    https://www.speedtest.net (Ookla)
+
+========== RUN A — baseline (phase 1 code, env 24×30) ==========
+
+Env:
+  VK_VPN_TUNNEL_MODE=video
+  VK_VPN_VP8_FPS=24
+  VK_VPN_VP8_BATCH=30
+  VK_VPN_LOG_LEVEL=info
+  VK_VPN_MTU=default (1400)
+
+| Test | DL Mbps | UL Mbps | Ping | Notes |
+|------|---------|---------|------|-------|
+| Without VPN | — | — | — | **не мерили** (линия как в фазе 0: ~72/70 Яндекс, bench 1547) |
+| 2a. With VPN (Ookla) #1 | 25 | 15 | 102 ms | peak ~100 Mbps ~0.5 s |
+| 2b. With VPN (Ookla) #2 | 21.38 | 1.98 | — | сразу после #1 |
+| 2c. With VPN (Ookla) #3 | 25.38 | 0 | — | пауза; active≈240 conn |
+
+ICE: host ↔ host (joiner + creator), stable, no disconnect during tests.
+
+3. curl via VPN (mirror.yandex.ru, ~91.86 MB):
+   Progress: 90% (83.39 MB), avg ~2.46 MB/s (~20 Mbps), ETA 00:04
+   Result: зависло на ~90%, как в фазе 0 (lost tail / TCP wait)
+   Phase 0 было: 96% @ ~8 Mbps, curl (18)
+
+Logs (app2.log @ curl):
+  sendQueue full, dropped — 14500+ frames (queue 1024, cap exhausted)
+  → причина обрыва curl: потеря данных VP8, не «пакеты вернутся»
+
+Server (serverlog @ stall ~14:36:55):
+  vp8: sent крупные кадры (до 32 KB), затем vp8: sent 24 bytes (keepalive)
+  active=67–71 TCP на relay
+
+Reconnect issue (14:44–14:45):
+  Disconnect → connect same link failed; ICE failed, 240+ stale [dc] close
+  VK topo SERVER + kick peer — отдельный баг lifecycle
+
+========== RUN B — aggressive (30×50) ==========
+Status: SKIP (not run)
+
+Reason: RUN A already saturates sendQueue (1024) with 13k+ drops on curl.
+Aggressive pacing increases load → worse drops, not higher DL.
+Next: redeploy phase 1b (queue 4096, no drop, adaptive drain) → repeat curl only.
+
+========== RUN C — MTU 1500 ==========
+Status: SKIP until curl completes or queue fix verified
+
+--- Conclusion ---
+[x] A better than phase 0: DL ~25 vs ~15; curl faster (~20 vs ~8 Mbps) but tail stall remains
+[ ] B better than A — not tested; not recommended before queue fix
+[ ] sendQueue full — confirmed; fix in code (default 4096, blocking send, adaptive drain)
+
+--- Agent recommendation ---
+1. Rebuild/deploy after vp8 queue fix (no new env for first retest).
+2. Retest: Ookla + same curl; check no sendQueue full in app2.log.
+3. RUN B only if retest clean and DL still < 30 Mbps sustained.
+4. Phase 1 lifecycle: fix stale connections on disconnect (active=240).

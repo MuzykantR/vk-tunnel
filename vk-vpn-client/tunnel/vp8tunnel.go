@@ -31,8 +31,6 @@ type VP8DataTunnel struct {
 	batch        int
 	sentFrames   atomic.Uint64
 	recvFrames   atomic.Uint64
-	droppedSend  atomic.Uint64
-	queueLen     atomic.Int32
 	OnData       func([]byte)
 	OnClose      func()
 }
@@ -99,14 +97,7 @@ func (t *VP8DataTunnel) SendData(data []byte) {
 	copy(payload, data)
 	select {
 	case t.sendQueue <- payload:
-		t.queueLen.Add(1)
 	case <-t.stopCh:
-	default:
-		n := t.droppedSend.Add(1)
-		if t.logFn != nil && (n == 1 || n%100 == 0) {
-			t.logFn("vp8: sendQueue full, dropped frame (total drops=%d, depth=%d cap=%d)",
-				n, t.queueLen.Load(), cap(t.sendQueue))
-		}
 	}
 }
 
@@ -223,11 +214,23 @@ func (t *VP8DataTunnel) writerLoop() {
 				if maxBurst < 1 {
 					maxBurst = 1
 				}
+				pending := len(t.sendQueue)
+				if pending > batch*2 {
+					maxBurst = batch * 8
+					if maxBurst > pending {
+						maxBurst = pending
+					}
+					if maxBurst > 512 {
+						maxBurst = 512
+					}
+					if t.logFn != nil && pending > batch*4 {
+						t.logFn("vp8: backlog drain pending=%d burst=%d", pending, maxBurst)
+					}
+				}
 				for sentThisTick < maxBurst {
 					var sample []byte
 					select {
 					case data := <-t.sendQueue:
-						t.queueLen.Add(-1)
 						sample = t.encodeSample(data)
 						sentThisTick++
 						idleTicks = 0
