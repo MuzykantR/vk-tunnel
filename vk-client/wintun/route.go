@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,7 +47,7 @@ func SetAdapterDNS(adapterName string, servers []string) {
 
 // FindTunAdapter finds the tun2socks adapter name.
 func FindTunAdapter() string {
-	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+	cmd := hiddenCmd("powershell", "-NoProfile", "-Command",
 		`if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) { Invoke-Expression '(Get-NetAdapter | Where-Object { $_.InterfaceDescription -like ''*tun2socks*'' } | Select-Object -First 1).Name' }`)
 	out, err := cmd.Output()
 	if err != nil {
@@ -178,7 +177,7 @@ func DeleteAllBypassRoutes() {
 		} else {
 			maskStr = net.IP(net.CIDRMask(ones, 32)).String()
 		}
-		_ = exec.Command("route", "DELETE", ip, "MASK", maskStr).Run()
+		_ = hiddenCmd("route", "DELETE", ip, "MASK", maskStr).Run()
 		addedRoutes.Delete(k)
 		count++
 		return true
@@ -201,14 +200,14 @@ func RemoveAdapter(name string) {
 	}
 	log.Printf("Force-removing adapter: %s", name)
 
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+	out, err := hiddenCmd("powershell", "-NoProfile", "-Command",
 		fmt.Sprintf(`if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { Get-NetAdapter -Name '%s' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false; Write-Output 'OK' }`, name)).CombinedOutput()
 	if err == nil && strings.Contains(string(out), "OK") {
 		log.Printf("Removed %s via PowerShell", name)
 		return
 	}
 
-	if cmdErr := exec.Command("netsh", "interface", "delete", "interface", "name="+name).Run(); cmdErr == nil {
+	if cmdErr := hiddenCmd("netsh", "interface", "delete", "interface", "name="+name).Run(); cmdErr == nil {
 		log.Printf("Removed %s via netsh", name)
 		return
 	}
@@ -249,10 +248,10 @@ func AddBypassSubnet(cidr, gateway string) {
 	maskIP := net.IP(mask)
 	maskStr := maskIP.String()
 
-	cmd := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway, "METRIC", "1")
+	cmd := hiddenCmd("route", "ADD", ip, "MASK", maskStr, gateway, "METRIC", "1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		cmd2 := exec.Command("route", "ADD", ip, "MASK", maskStr, gateway)
+		cmd2 := hiddenCmd("route", "ADD", ip, "MASK", maskStr, gateway)
 		out, err = cmd2.CombinedOutput()
 		if err != nil {
 			log.Printf("route ADD subnet %s failed: %s", cidr, strings.TrimSpace(string(out)))
@@ -267,10 +266,10 @@ func addHostRoute(ip, gateway string) error {
 	if ip == gateway {
 		return nil
 	}
-	cmd := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway, "METRIC", "1")
+	cmd := hiddenCmd("route", "ADD", ip, "MASK", "255.255.255.255", gateway, "METRIC", "1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		cmd2 := exec.Command("route", "ADD", ip, "MASK", "255.255.255.255", gateway)
+		cmd2 := hiddenCmd("route", "ADD", ip, "MASK", "255.255.255.255", gateway)
 		out, err = cmd2.CombinedOutput()
 		if err != nil {
 			outStr := strings.TrimSpace(string(out))
@@ -289,7 +288,7 @@ func addHostRoute(ip, gateway string) error {
 
 // runNetsh executes netsh with the given args.
 func runNetsh(args ...string) ([]byte, error) {
-	cmd := exec.Command("netsh", args...)
+	cmd := hiddenCmd("netsh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("netsh %s failed: %s (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -306,8 +305,8 @@ func CleanupAllStaleState(defaultGateway string) {
 	DeleteAllBypassRoutes()
 
 	// 2. Delete split default routes (in case Disconnect didn't run, e.g. after crash)
-	exec.Command("route", "DELETE", "0.0.0.0", "MASK", "128.0.0.0").Run()
-	exec.Command("route", "DELETE", "128.0.0.0", "MASK", "128.0.0.0").Run()
+	hiddenCmd("route", "DELETE", "0.0.0.0", "MASK", "128.0.0.0").Run()
+	hiddenCmd("route", "DELETE", "128.0.0.0", "MASK", "128.0.0.0").Run()
 
 	// 3. Delete known stale subnet routes from previous sessions that we don't currently track.
 	vkSubnets := []string{
@@ -328,18 +327,18 @@ func CleanupAllStaleState(defaultGateway string) {
 			ones, _ := strconv.Atoi(parts[1])
 			mask := net.CIDRMask(ones, 32)
 			maskIP := net.IP(mask)
-			exec.Command("route", "DELETE", ip, "MASK", maskIP.String()).Run()
+			hiddenCmd("route", "DELETE", ip, "MASK", maskIP.String()).Run()
 		}
 	}
 
 	// 4. Delete DNS bypass routes from previous sessions
 	for _, dns := range []string{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"} {
-		exec.Command("route", "DELETE", dns, "MASK", "255.255.255.255").Run()
+		hiddenCmd("route", "DELETE", dns, "MASK", "255.255.255.255").Run()
 	}
 
 	// 5. Delete bypass route for default gateway (if it was added)
 	if defaultGateway != "" {
-		exec.Command("route", "DELETE", defaultGateway, "MASK", "255.255.255.255").Run()
+		hiddenCmd("route", "DELETE", defaultGateway, "MASK", "255.255.255.255").Run()
 	}
 
 	// 6. Force-remove WLVPN adapter. Idempotent — safe if it doesn't exist.

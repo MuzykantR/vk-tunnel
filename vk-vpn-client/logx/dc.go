@@ -26,3 +26,8 @@ func DCClose(id uint32, addr string, tx, rx int64) {
 func DCConnectFail(id uint32, addr string, err error) {
 	Warn("dc", "dial id=%d %s: %v", id, addr, err)
 }
+
+// ResetDCStats clears the global relay counter (e.g. new TunnelSession after rejoin).
+func ResetDCStats() {
+	dcActive.Store(0)
+}

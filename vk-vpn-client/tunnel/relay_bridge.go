@@ -199,13 +199,13 @@ func (rb *RelayBridge) handleUDP(connID uint32, payload []byte) {
 }
 
 func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
-	logx.DCOpen(connID, addr)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		logx.DCConnectFail(connID, addr, err)
 		rb.send(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
+	logx.DCOpen(connID, addr)
 	rb.conns.Store(connID, conn)
 	rb.send(connID, MsgConnectOK, nil)
 

@@ -268,6 +268,7 @@ func (s *TunnelSession) AddICECandidate(c webrtc.ICECandidateInit) error {
 func (s *TunnelSession) Close() {
 	s.closeOnce.Do(func() {
 		s.closeAllConns()
+		logx.ResetDCStats()
 		if s.vp8Tunnel != nil {
 			s.vp8Tunnel.Stop()
 		}
@@ -409,8 +410,6 @@ func (s *TunnelSession) handleUDP(connID uint32, payload []byte) {
 }
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
-	logx.DCOpen(connID, addr)
-
 	// Reject unroutable IPv6 destinations before we try to dial them — these
 	// always fail with "invalid argument" on the VPS and waste a 10 s dial timeout.
 	if host, _, err := net.SplitHostPort(addr); err == nil {
@@ -428,6 +427,8 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 		s.sendDCFrame(connID, MsgConnectErr, []byte(err.Error()))
 		return
 	}
+	logx.DCOpen(connID, addr)
+
 	dc := &dcConn{
 		conn: conn,
 		addr: addr,
@@ -467,7 +468,9 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 func (s *TunnelSession) closeAllConns() {
 	s.conns.Range(func(key, val any) bool {
 		dc := val.(*dcConn)
+		id := key.(uint32)
 		dc.conn.Close()
+		logx.DCClose(id, dc.addr, dc.tx, dc.rx)
 		s.conns.Delete(key)
 		return true
 	})

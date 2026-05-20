@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
-	"os/exec"
 	"strings"
 )
 
@@ -31,7 +30,7 @@ type psRoute struct {
 // filters out anything that points through a VPN/TUN adapter, and returns
 // the lowest-metric remaining one. This is how whitelist-bypass handles it.
 func defaultGatewayFromPowerShell() string {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+	out, err := hiddenCmd("powershell", "-NoProfile", "-Command",
 		`Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction Stop |`+
 			`Sort-Object -Property RouteMetric |`+
 			`Select-Object NextHop,InterfaceAlias,RouteMetric |`+
@@ -90,7 +89,7 @@ func isVirtualInterface(aliasLower string) bool {
 // a fallback for hosts where PowerShell Get-NetRoute is unavailable
 // (very old Windows or stripped images).
 func defaultGatewayLegacy() string {
-	out, err := exec.Command("route", "print", "0.0.0.0").CombinedOutput()
+	out, err := hiddenCmd("route", "print", "0.0.0.0").CombinedOutput()
 	if err != nil {
 		return "192.168.1.1"
 	}
@@ -105,7 +104,7 @@ func defaultGatewayLegacy() string {
 			return gw
 		}
 	}
-	out, err = exec.Command("ipconfig").CombinedOutput()
+	out, err = hiddenCmd("ipconfig").CombinedOutput()
 	if err == nil {
 		lines := bytes.Split(out, []byte("\n"))
 		for i, line := range lines {
