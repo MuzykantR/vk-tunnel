@@ -8,7 +8,21 @@ import (
 	"github.com/vk-vpn/client/logx"
 )
 
-const defaultRelayAcceptanceWait = 12 * time.Second
+const (
+	defaultRelayAcceptanceWait     = 8 * time.Second
+	defaultPreferDirectWaitRedirect = 3 * time.Second
+)
+
+// PreferDirectWaitBeforeRedirect is how long we wait for host/srflx before redirect on a relay pair (VK_VPN_ICE_PREFER_DIRECT_WAIT).
+// Keep short (3s): whitelist users need redirect quickly; pion may still upgrade ICE later.
+func PreferDirectWaitBeforeRedirect() time.Duration {
+	if v := os.Getenv("VK_VPN_ICE_PREFER_DIRECT_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return defaultPreferDirectWaitRedirect
+}
 
 // RelayAcceptanceMinWait returns how long pion delays picking a TURN relay pair (VK_VPN_ICE_RELAY_WAIT).
 func RelayAcceptanceMinWait() time.Duration {

@@ -1,0 +1,37 @@
+# Бенчмарк vk-vpn (режим whitelist / relay)
+
+## Когда считать «relay-сессию»
+
+В `app.log` (joiner):
+
+- `ICE uses TURN relay` или `ICE bypass via TURN relay`
+- Номинированная пара: `relay/...` на **local** стороне
+
+На сервере часто: `srflx <-> prflx` при том же пути — это нормально (другая сторона stats).
+
+## Чеклист одной сессии
+
+1. Connect → `VPN Connected` **< 10 с** после `VP8 TUNNEL CONNECTED` (не 15+ с ожидания).
+2. Нет `watchdog unhealthy — ICE restart` во время curl.
+3. `curl.exe -o NUL -w "bytes=%{size_download} time=%{time_total}s\n" "http://mirror.yandex.ru/.../ubuntu-24.04.4-netboot-amd64.tar.gz"`
+4. 2ip.ru → страна VPS.
+5. В `serverlog`: `relay: close id=N ... rx=...` для curl — `rx` близко к размеру файла.
+
+## Env
+
+| Переменная | По умолчанию | Назначение |
+|------------|--------------|------------|
+| `VK_VPN_ICE_RELAY_WAIT` | 8s | Pion: задержка выбора TURN |
+| `VK_VPN_ICE_PREFER_DIRECT_WAIT` | 3s | Ожидание direct перед redirect (короткое!) |
+| `VK_VPN_ICE_PREFER_DIRECT_WAIT=0` | — | Сразу redirect на relay |
+
+## Ожидаемая скорость (relay + VP8)
+
+| Уровень | Mbps |
+|---------|------|
+| Плохо | < 1 |
+| Норма | 2–8 |
+| Хорошо | 8–15 |
+| Потолок VP8 pacing | ~6.5 Mbps target в логе |
+
+Сравнение с Marzban на том же VPS: Marzban часто 50–500+ Mbps; vk-vpn — другой транспорт.

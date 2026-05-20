@@ -249,13 +249,17 @@ func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(stri
 
 func (a *App) waitICEPairIPs(ctx context.Context) error {
 	start := time.Now()
-	preferDirect := clientAPI.ICERelayAcceptanceWait() + 2*time.Second
+	preferDirect := clientAPI.ICEPreferDirectWait()
+	var lastRelayWaitLog time.Time
 	for {
 		if ips := clientAPI.ICEBypassIPs(); len(ips) > 0 {
 			elapsed := time.Since(start)
 			if clientAPI.ICEPairUsesRelay() && elapsed < preferDirect {
-				log.Printf("ICE on TURN relay — waiting up to %s for direct host/srflx (elapsed %s, bypass %v)",
-					(preferDirect - elapsed).Round(time.Second), elapsed.Round(time.Second), ips)
+				if lastRelayWaitLog.IsZero() || time.Since(lastRelayWaitLog) >= time.Second {
+					log.Printf("ICE on TURN relay — waiting up to %s for direct host/srflx (elapsed %s, bypass %v)",
+						(preferDirect - elapsed).Round(time.Second), elapsed.Round(time.Second), ips)
+					lastRelayWaitLog = time.Now()
+				}
 			} else {
 				if clientAPI.ICEPairUsesRelay() {
 					log.Printf("ICE bypass via TURN relay (no direct pair in %s): %v", elapsed.Round(time.Second), ips)

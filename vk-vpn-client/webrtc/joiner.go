@@ -369,6 +369,13 @@ func (j *Joiner) initPC() {
 		webrtc.NetworkTypeUDP4,
 		webrtc.NetworkTypeTCP4,
 	})
+	// Never gather ICE host candidates on the TUN (10.8.0.x) — breaks paths after redirect.
+	se.SetIPFilter(func(ip net.IP) bool {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4[0] != 10
+		}
+		return false
+	})
 	// Detach DataChannels so the relay reads from a raw ReadWriteCloser in
 	// its own goroutine. Without this, pion drives our OnMessage callback
 	// from its internal SCTP reader and any slowness in the callback chain

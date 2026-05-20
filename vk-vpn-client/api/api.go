@@ -216,9 +216,14 @@ func ICEPairUsesRelay() bool {
 	return activeJoiner.ICEPairUsesRelay()
 }
 
-// ICERelayAcceptanceWait is how long we wait for a direct pair before allowing redirect on relay.
+// ICERelayAcceptanceWait is how long pion delays nominating TURN (VK_VPN_ICE_RELAY_WAIT).
 func ICERelayAcceptanceWait() time.Duration {
 	return webrtc.RelayAcceptanceMinWait()
+}
+
+// ICEPreferDirectWait is how long redirect waits for a non-relay pair (VK_VPN_ICE_PREFER_DIRECT_WAIT).
+func ICEPreferDirectWait() time.Duration {
+	return webrtc.PreferDirectWaitBeforeRedirect()
 }
 
 // WaitICEConnected blocks until ICE is connected/completed or ctx expires.
