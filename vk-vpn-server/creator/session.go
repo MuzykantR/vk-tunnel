@@ -460,9 +460,29 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 			break
 		}
 	}
-	logx.DCClose(connID, addr, dc.tx, dc.rx)
+	sctpPending := s.waitSCTPDrain()
+	logx.L("dc", "close id=%d %s tx=%d rx=%d sctp_pending=%d", connID, addr, dc.tx, dc.rx, sctpPending)
 	s.sendDCFrame(connID, MsgClose, nil)
+	close(dc.inCh)
+	dc.conn.Close()
 	s.conns.Delete(connID)
+	logx.DCClose(connID, addr, dc.tx, dc.rx)
+}
+
+func (s *TunnelSession) waitSCTPDrain() uint64 {
+	if s.maxDCBuf == 0 || s.dc == nil {
+		return 0
+	}
+	deadline := time.Now().Add(tunnel.RelayDrainTimeoutFromEnv())
+	var pending uint64
+	for time.Now().Before(deadline) {
+		pending = s.dc.BufferedAmount()
+		if pending == 0 {
+			return 0
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return pending
 }
 
 func (s *TunnelSession) closeAllConns() {
