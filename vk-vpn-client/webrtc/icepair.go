@@ -52,44 +52,28 @@ func LogSelectedICEPair(pc *pion.PeerConnection, tag string) bool {
 	return false
 }
 
-// ICEBypassIPs collects every public IPv4 from ICE stats (candidates + succeeded pairs).
+// ICEBypassIPs returns public IPv4 of the nominated succeeded ICE pair only.
+// Avoids /32 bypass routes for every TURN/stale candidate (redirect used to break ICE).
 func ICEBypassIPs(pc *pion.PeerConnection) []string {
-	if pc == nil {
+	loc, rem, ok := SelectedICEPairIPs(pc)
+	if !ok {
 		return nil
 	}
 	seen := make(map[string]struct{})
 	var ips []string
-	add := func(ip string) {
+	for _, ip := range []string{loc, rem} {
 		p := net.ParseIP(ip)
 		if p == nil || p.To4() == nil {
-			return
+			continue
 		}
 		if p.IsLoopback() || p.IsLinkLocalUnicast() || p.IsPrivate() {
-			return
+			continue
 		}
-		if _, ok := seen[ip]; ok {
-			return
+		if _, dup := seen[ip]; dup {
+			continue
 		}
 		seen[ip] = struct{}{}
 		ips = append(ips, ip)
-	}
-	cands := make(map[string]pion.ICECandidateStats)
-	for _, stat := range pc.GetStats() {
-		switch s := stat.(type) {
-		case pion.ICECandidateStats:
-			cands[s.ID] = s
-			add(s.IP)
-		case pion.ICECandidatePairStats:
-			if s.State != pion.StatsICECandidatePairStateSucceeded {
-				continue
-			}
-			if loc, ok := cands[s.LocalCandidateID]; ok {
-				add(loc.IP)
-			}
-			if rem, ok := cands[s.RemoteCandidateID]; ok {
-				add(rem.IP)
-			}
-		}
 	}
 	return ips
 }

@@ -337,12 +337,23 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 			log.Printf("[dc] conn %d inCh full, dropping %d bytes from joiner", connID, len(payload))
 		}
 	case MsgClose:
-		val, ok := s.conns.LoadAndDelete(connID)
-		if ok {
-			dc := val.(*dcConn)
-			close(dc.inCh)
-		}
+		s.closeDCConn(connID)
 	}
+}
+
+func (s *TunnelSession) closeDCConn(connID uint32) bool {
+	val, ok := s.conns.LoadAndDelete(connID)
+	if !ok {
+		return false
+	}
+	dc := val.(*dcConn)
+	func() {
+		defer func() { recover() }()
+		close(dc.inCh)
+	}()
+	dc.conn.Close()
+	logx.DCClose(connID, dc.addr, dc.tx, dc.rx)
+	return true
 }
 
 // sendDCFrame writes a framed message into the detached DataChannel. Pion's
@@ -410,15 +421,9 @@ func (s *TunnelSession) handleUDP(connID uint32, payload []byte) {
 }
 
 func (s *TunnelSession) connectTCP(connID uint32, addr string) {
-	// Reject unroutable IPv6 destinations before we try to dial them — these
-	// always fail with "invalid argument" on the VPS and waste a 10 s dial timeout.
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-				s.sendDCFrame(connID, MsgConnectErr, []byte("unroutable address"))
-				return
-			}
-		}
+	if tunnel.RelayAddrUnroutable(addr) {
+		s.sendDCFrame(connID, MsgConnectErr, []byte("unroutable address"))
+		return
 	}
 
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
@@ -463,10 +468,7 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	sctpPending := s.waitSCTPDrain()
 	logx.L("dc", "close id=%d %s tx=%d rx=%d sctp_pending=%d", connID, addr, dc.tx, dc.rx, sctpPending)
 	s.sendDCFrame(connID, MsgClose, nil)
-	close(dc.inCh)
-	dc.conn.Close()
-	s.conns.Delete(connID)
-	logx.DCClose(connID, addr, dc.tx, dc.rx)
+	s.closeDCConn(connID)
 }
 
 func (s *TunnelSession) waitSCTPDrain() uint64 {
@@ -486,12 +488,8 @@ func (s *TunnelSession) waitSCTPDrain() uint64 {
 }
 
 func (s *TunnelSession) closeAllConns() {
-	s.conns.Range(func(key, val any) bool {
-		dc := val.(*dcConn)
-		id := key.(uint32)
-		dc.conn.Close()
-		logx.DCClose(id, dc.addr, dc.tx, dc.rx)
-		s.conns.Delete(key)
+	s.conns.Range(func(key, _ any) bool {
+		s.closeDCConn(key.(uint32))
 		return true
 	})
 }

@@ -219,8 +219,16 @@ func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(stri
 		}
 		flushBypass("post-redirect")
 		clientAPI.NotifyDefaultRouteActive()
-		time.Sleep(1 * time.Second)
+		const postRedirectSoak = 3 * time.Second
+		soakEnd := time.Now().Add(postRedirectSoak)
+		for time.Now().Before(soakEnd) {
+			if !clientAPI.IsICEConnected() {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 		if clientAPI.IsICEConnected() {
+			log.Printf("ICE stable %v after redirect attempt %d", postRedirectSoak, attempt)
 			return nil
 		}
 		log.Printf("ICE lost after redirect attempt %d — rolling back split routes only", attempt)

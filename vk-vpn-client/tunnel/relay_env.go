@@ -7,14 +7,14 @@ import (
 )
 
 const (
-	defaultRelayConnectLimit   = 0 // 0 = unlimited
+	defaultRelayConnectLimit   = 0 // unlimited
 	defaultRelayDrainTimeout   = 120 * time.Second
 	defaultRelayInboundGrace   = 3 * time.Second
 	defaultRelayInboundIdle    = 250 * time.Millisecond
 )
 
 // RelayConnectLimitFromEnv limits parallel creator-side TCP relays (VK_VPN_RELAY_CONNECT_LIMIT).
-// 0 disables the limit. Default 0; use 32–48 to reduce ACK starvation during bulk download + browser.
+// 0 disables the limit (default). Optional cap (e.g. 32–48) for overloaded VP8 paths.
 func RelayConnectLimitFromEnv() int {
 	if v := os.Getenv("VK_VPN_RELAY_CONNECT_LIMIT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {

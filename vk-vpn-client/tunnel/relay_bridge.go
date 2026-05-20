@@ -185,15 +185,24 @@ func (rb *RelayBridge) handleCreatorMessage(connID uint32, msgType byte, payload
 			c.Write(payload)
 		}
 	case MsgClose:
-		if val, ok := rb.conns.LoadAndDelete(connID); ok {
-			if rc, ok := val.(*relayTCP); ok {
-				rc.conn.Close()
-				logx.DCClose(connID, rc.addr, 0, rc.rx)
-			} else if c, ok := val.(net.Conn); ok {
-				c.Close()
-			}
-		}
+		rb.closeRelayTCP(connID)
 	}
+}
+
+// closeRelayTCP closes a creator-side origin TCP once (MsgClose + connectTCP EOF share this path).
+func (rb *RelayBridge) closeRelayTCP(connID uint32) bool {
+	val, ok := rb.conns.LoadAndDelete(connID)
+	if !ok {
+		return false
+	}
+	switch v := val.(type) {
+	case *relayTCP:
+		v.conn.Close()
+		logx.DCClose(connID, v.addr, 0, v.rx)
+	case net.Conn:
+		v.Close()
+	}
+	return true
 }
 
 func (rb *RelayBridge) handleUDP(connID uint32, payload []byte) {
@@ -244,6 +253,11 @@ func (rb *RelayBridge) closeJoinerAfterInboundDrain(sc *socksConn, connID uint32
 }
 
 func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
+	if RelayAddrUnroutable(addr) {
+		logx.DCConnectFail(connID, addr, fmt.Errorf("unroutable address"))
+		rb.send(connID, MsgConnectErr, []byte("unroutable address"))
+		return
+	}
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		logx.DCConnectFail(connID, addr, err)
@@ -275,9 +289,7 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 	}
 
 	rb.send(connID, MsgClose, nil)
-	rc.conn.Close()
-	rb.conns.Delete(connID)
-	logx.DCClose(connID, addr, 0, rc.rx)
+	rb.closeRelayTCP(connID)
 }
 
 type socksConn struct {
@@ -299,18 +311,8 @@ func (rb *RelayBridge) Close() {
 	if ln != nil {
 		ln.Close()
 	}
-	rb.conns.Range(func(key, value any) bool {
-		id, _ := key.(uint32)
-		switch v := value.(type) {
-		case *relayTCP:
-			v.conn.Close()
-			logx.DCClose(id, v.addr, 0, v.rx)
-		case net.Conn:
-			v.Close()
-		case *socksConn:
-			v.conn.Close()
-		}
-		rb.conns.Delete(key)
+	rb.conns.Range(func(key, _ any) bool {
+		rb.closeRelayTCP(key.(uint32))
 		return true
 	})
 }
