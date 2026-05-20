@@ -146,12 +146,6 @@ func (a *App) Connect(uri string) error {
 	}
 	a.bypassSink = onNewBypassIP
 
-	log.Println("Starting VPN Core Client (ICE/DTLS/DC) on prepared routing table...")
-	if err := clientAPI.StartJoinerWithAuth(auth, socksPort, onNewBypassIP); err != nil {
-		a.partialTeardown()
-		return err
-	}
-
 	flushBypass := func(label string) {
 		for _, ip := range clientAPI.GetActiveBypassIPs() {
 			wintun.AddBypassRoute(ip, a.defaultGW)
@@ -160,6 +154,18 @@ func (a *App) Connect(uri string) error {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
 		log.Printf("Bypass routes flushed (%s)", label)
+	}
+
+	clientAPI.SetSplitRouteRollback(func() bool {
+		wintun.DeleteSplitDefaultRoutes(tunName)
+		flushBypass("ice-rollback")
+		return true
+	})
+
+	log.Println("Starting VPN Core Client (ICE/DTLS/DC) on prepared routing table...")
+	if err := clientAPI.StartJoinerWithAuth(auth, socksPort, onNewBypassIP); err != nil {
+		a.partialTeardown()
+		return err
 	}
 
 	if err := a.installDefaultRouteWhenReady(tunName, flushBypass); err != nil {
@@ -218,8 +224,7 @@ func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(stri
 			return err
 		}
 		flushBypass("post-redirect")
-		clientAPI.NotifyDefaultRouteActive()
-		const postRedirectSoak = 3 * time.Second
+		const postRedirectSoak = 5 * time.Second
 		soakEnd := time.Now().Add(postRedirectSoak)
 		for time.Now().Before(soakEnd) {
 			if !clientAPI.IsICEConnected() {
@@ -228,6 +233,7 @@ func (a *App) installDefaultRouteWhenReady(tunName string, flushBypass func(stri
 			time.Sleep(200 * time.Millisecond)
 		}
 		if clientAPI.IsICEConnected() {
+			clientAPI.NotifyDefaultRouteActive()
 			log.Printf("ICE stable %v after redirect attempt %d", postRedirectSoak, attempt)
 			return nil
 		}

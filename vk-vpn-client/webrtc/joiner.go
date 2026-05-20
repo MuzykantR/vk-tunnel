@@ -61,6 +61,7 @@ type Joiner struct {
 	iceStableWaitGen atomic.Uint32
 	defaultRouteReady atomic.Bool
 	defaultRouteAt    time.Time
+	splitRouteRollback func() bool // vk-client: remove 0.0.0.0/1 split routes when redirect breaks ICE
 	onNewBypassIP func(string) // called the moment a new remote ICE IP is observed
 	iceRestartMu  sync.Mutex
 	iceRestarting bool
@@ -119,10 +120,15 @@ func (j *Joiner) IsICEConnected() bool {
 	return st == webrtc.ICEConnectionStateConnected || st == webrtc.ICEConnectionStateCompleted
 }
 
+// SetSplitRouteRollback is invoked on ICE disconnect shortly after redirect to
+// drop split default routes and let srflx/host recover without ICE restart.
+func (j *Joiner) SetSplitRouteRollback(fn func() bool) {
+	j.splitRouteRollback = fn
+}
+
 // SetDefaultRouteReady marks that split default routes are installed; the tunnel
 // watchdog and ICE-restart suppression treat post-redirect recovery differently.
 func (j *Joiner) SetDefaultRouteReady() {
-	j.iceStableReached.Store(true)
 	j.defaultRouteReady.Store(true)
 	j.mu.Lock()
 	j.defaultRouteAt = time.Now()
@@ -375,6 +381,10 @@ func (j *Joiner) initPC() {
 			return ip4[0] != 10
 		}
 		return false
+	})
+	se.SetInterfaceFilter(func(name string) bool {
+		n := strings.ToUpper(name)
+		return !strings.Contains(n, "WLVPN")
 	})
 	// Detach DataChannels so the relay reads from a raw ReadWriteCloser in
 	// its own goroutine. Without this, pion drives our OnMessage callback
@@ -843,7 +853,20 @@ func (j *Joiner) maybeMarkICEStable() {
 // are still in disconnected after the grace, ask the creator side for an
 // ICE restart by issuing a renegotiation offer.
 func (j *Joiner) handleICEDisconnect() {
-	const grace = 12 * time.Second
+	grace := 12 * time.Second
+	if j.defaultRouteReady.Load() {
+		j.mu.Lock()
+		sinceRoute := time.Since(j.defaultRouteAt)
+		j.mu.Unlock()
+		if sinceRoute < 2*time.Minute {
+			grace = 20 * time.Second
+			if j.splitRouteRollback != nil {
+				log.Printf("ICE disconnect %s after redirect — rolling back split default routes (WLB-style)",
+					sinceRoute.Round(time.Second))
+				j.splitRouteRollback()
+			}
+		}
+	}
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {
@@ -882,16 +905,17 @@ func (j *Joiner) requestICERestart() {
 		log.Println("ICE restart: suppressed (never connected)")
 		return
 	}
-	allowEarly := false
 	if j.defaultRouteReady.Load() {
 		j.mu.Lock()
 		sinceRoute := time.Since(j.defaultRouteAt)
 		j.mu.Unlock()
 		if sinceRoute < 2*time.Minute {
-			allowEarly = true
+			log.Printf("ICE restart: suppressed (%s after redirect — use route rollback / STUN recovery)",
+				sinceRoute.Round(time.Second))
+			return
 		}
 	}
-	if !allowEarly && time.Since(first) < 45*time.Second {
+	if time.Since(first) < 45*time.Second {
 		log.Printf("ICE restart: suppressed (within 45s of first connect, elapsed=%s)", time.Since(first).Round(time.Second))
 		return
 	}

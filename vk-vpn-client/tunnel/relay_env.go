@@ -9,8 +9,8 @@ import (
 const (
 	defaultRelayConnectLimit   = 0 // unlimited
 	defaultRelayDrainTimeout   = 120 * time.Second
-	defaultRelayInboundGrace   = 3 * time.Second
-	defaultRelayInboundIdle    = 250 * time.Millisecond
+	defaultRelayInboundGrace   = 10 * time.Second
+	defaultRelayInboundIdle    = 500 * time.Millisecond
 )
 
 // RelayConnectLimitFromEnv limits parallel creator-side TCP relays (VK_VPN_RELAY_CONNECT_LIMIT).

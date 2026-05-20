@@ -14,9 +14,16 @@ import (
 )
 
 var (
-	activeJoiner *webrtc.Joiner
-	cancelFunc   context.CancelFunc
+	activeJoiner         *webrtc.Joiner
+	cancelFunc           context.CancelFunc
+	splitRouteRollback   func() bool
 )
+
+// SetSplitRouteRollback registers a callback that removes split default routes
+// when ICE drops right after redirect (before an ICE restart).
+func SetSplitRouteRollback(fn func() bool) {
+	splitRouteRollback = fn
+}
 
 // ResolveSession parses and decrypts the URI, then performs all VK API requests
 // (token, captcha, joinConversationByLink) to produce the AuthParams needed by
@@ -57,6 +64,9 @@ func StartJoinerWithAuth(auth *webrtc.AuthParams, socksPort int, onNewBypassIP f
 	joiner := webrtc.NewJoiner(ctx, auth, socksPort)
 	if onNewBypassIP != nil {
 		joiner.SetOnNewBypassIP(onNewBypassIP)
+	}
+	if splitRouteRollback != nil {
+		joiner.SetSplitRouteRollback(splitRouteRollback)
 	}
 	activeJoiner = joiner
 
