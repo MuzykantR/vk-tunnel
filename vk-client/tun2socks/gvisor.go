@@ -6,20 +6,27 @@ import (
 	"sync"
 
 	"github.com/xjasonlyu/tun2socks/v2/engine"
+
+	"vk-client/tunconfig"
 )
 
 // Engine forwards IP packets from a Wintun adapter to a local SOCKS5 proxy.
 type Engine struct {
 	adapterName string
 	socksURL    string
+	mtu         int
 	mu          sync.Mutex
 	started     bool
 }
 
-func NewEngine(adapterName, socksAddr string) *Engine {
+func NewEngine(adapterName, socksAddr string, mtu int) *Engine {
+	if mtu <= 0 {
+		mtu = tunconfig.DefaultMTU
+	}
 	return &Engine{
 		adapterName: adapterName,
 		socksURL:    "socks5://" + socksAddr,
+		mtu:         mtu,
 	}
 }
 
@@ -29,11 +36,11 @@ func (e *Engine) Start() error {
 	if e.started {
 		return nil
 	}
-	log.Printf("Starting tun2socks: device=tun://%s proxy=%s", e.adapterName, e.socksURL)
+	log.Printf("Starting tun2socks: device=tun://%s proxy=%s mtu=%d", e.adapterName, e.socksURL, e.mtu)
 	key := &engine.Key{
 		Device: "tun://" + e.adapterName,
 		Proxy:  e.socksURL,
-		MTU:    1400,
+		MTU:    e.mtu,
 	}
 	engine.Insert(key)
 	engine.Start()
@@ -55,11 +62,11 @@ func (e *Engine) Stop() {
 
 // Legacy constructor kept for compatibility during migration.
 func NewEngineFromSession(_ interface{}, socksURL string) *Engine {
-	return &Engine{adapterName: "WLVPN", socksURL: "socks5://" + socksURL}
+	return NewEngine("WLVPN", socksURL, tunconfig.DefaultMTU)
 }
 
 func MustStart(adapterName, socksHostPort string) (*Engine, error) {
-	eng := NewEngine(adapterName, socksHostPort)
+	eng := NewEngine(adapterName, socksHostPort, tunconfig.MTUFromEnv())
 	if err := eng.Start(); err != nil {
 		return nil, fmt.Errorf("tun2socks: %w", err)
 	}

@@ -1,0 +1,47 @@
+﻿=== vk-vpn benchmark notes (phase 0) ===
+Date: 2026-05-20 (заполнено 20.05.2026)
+Network: [x] Wi-Fi  [ ] Ethernet  Location: home (Россия)
+
+--- Скорость: инструменты (как измеряли) ---
+Без VPN: https://yandex.ru/internet/ (Яндекс Интернетометр)
+С VPN:   https://www.speedtest.net (Ookla — через туннель доступен)
+
+--- Env (baseline phase 0) ---
+VK_VPN_TUNNEL_MODE=video
+VK_VPN_VP8_FPS=24
+VK_VPN_VP8_BATCH=30
+VK_VPN_LOG_LEVEL=info
+
+--- 1. Without VPN ---
+DL Mbps: 72.45
+UL Mbps: 70.82
+Ping ms: 14
+Инструмент: Яндекс Интернетометр
+Speedtest result ID: —
+
+--- 2. With VPN ---
+DL Mbps: 15 sustained (пик ~60 на графике)
+UL Mbps: 40
+Ping ms: 105
+Инструмент: Ookla (speedtest.net)
+Speedtest result ID: —
+ICE selected:
+  joiner: ICE selected host/ <-> host/ ( -> )
+  creator: ICE selected host/ <-> host/ ; PC connected (tunnel=video)
+ICE stable 60s under load: [x] yes  [ ] no
+Disconnect/restart during speedtest: [ ] yes  [x] no
+
+--- 3. Download-only (curl через VPN) ---
+URL: http://mirror.yandex.ru/ubuntu-releases/24.04/ubuntu-24.04.4-netboot-amd64.tar.gz
+size_download bytes: 92872090
+time_total s: 92.923
+Computed Mbps: ~8.0 (92872090*8/92.923/1e6)
+Итог: curl: (18) end of response with 3458640 bytes missing (~96% файла ~91.86 MB)
+Симптом: зависание на последних ~3.3 MB; в логах сервера VP8 ушёл в keepalive 24 B, [dc] close волнами
+
+--- Conclusion ---
+[x] Line is fast (72/70 без VPN); tunnel DL bottleneck (~15 sustained, curl ~8 avg)
+[ ] Home uplink ~20 Mbps limits VPN
+[ ] ICE unstable during speedtest (но tail-stall на большом curl — отдельная проблема)
+
+Фаза 0 закрыта → фаза 1 (VP8 scheduler, MTU, ICE warn). Вуз из бенчмарка исключён.

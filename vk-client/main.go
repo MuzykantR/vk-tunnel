@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 
 	"vk-client/tun2socks"
+	"vk-client/tunconfig"
 	"vk-client/wintun"
 
 	clientAPI "github.com/vk-vpn/client/api"
@@ -112,7 +113,9 @@ func (a *App) Connect(uri string) error {
 		a.partialTeardown()
 		return err
 	}
-	if err := wintun.SetMTU(tunName, 1400); err != nil {
+	mtu := tunconfig.MTUFromEnv()
+	log.Printf("TUN MTU=%d (env VK_VPN_MTU, default %d)", mtu, tunconfig.DefaultMTU)
+	if err := wintun.SetMTU(tunName, mtu); err != nil {
 		log.Printf("Warning: failed to set MTU: %v", err)
 	}
 

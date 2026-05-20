@@ -366,7 +366,7 @@ func (j *Joiner) initPC() {
 				logx.L("joiner", "first ICE connected")
 			}
 			j.mu.Unlock()
-			go LogSelectedICEPair(j.pc, "joiner")
+			ScheduleICEPairLogging(j.pc, "joiner")
 			go j.maybeMarkICEStable()
 		case webrtc.ICEConnectionStateDisconnected:
 			// Transient disconnect during first ICE handshake is normal (connected→

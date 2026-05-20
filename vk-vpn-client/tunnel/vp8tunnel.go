@@ -10,38 +10,41 @@ import (
 )
 
 const (
-	DefaultVP8FPS          = 24
-	DefaultVP8Batch        = 30
-	keepaliveIdlePeriod    = 100 * time.Millisecond
-	vp8SendQueue           = 1024
+	DefaultVP8FPS       = 24
+	DefaultVP8Batch     = 30
+	keepaliveIdlePeriod = 100 * time.Millisecond
+	vp8LargeSampleBytes = 4096
 )
 
 // VP8DataTunnel sends framed SOCKS data over a VP8 video track (whitelist-bypass).
 type VP8DataTunnel struct {
-	track     *webrtc.TrackLocalStaticSample
-	logFn     func(string, ...interface{})
-	obf       *TunnelObfuscator
-	stopCh    chan struct{}
-	sendQueue chan []byte
-	cfgChan   chan struct{}
-	stopOnce  sync.Once
-	running   atomic.Bool
-	cfgMu     sync.Mutex
-	fps       int
-	batch     int
-	sentFrames atomic.Uint64
-	recvFrames atomic.Uint64
-	OnData    func([]byte)
-	OnClose   func()
+	track        *webrtc.TrackLocalStaticSample
+	logFn        func(string, ...interface{})
+	obf          *TunnelObfuscator
+	stopCh       chan struct{}
+	sendQueue    chan []byte
+	cfgChan      chan struct{}
+	stopOnce     sync.Once
+	running      atomic.Bool
+	cfgMu        sync.Mutex
+	fps          int
+	batch        int
+	sentFrames   atomic.Uint64
+	recvFrames   atomic.Uint64
+	droppedSend  atomic.Uint64
+	queueLen     atomic.Int32
+	OnData       func([]byte)
+	OnClose      func()
 }
 
 func NewVP8DataTunnel(track *webrtc.TrackLocalStaticSample, obf *TunnelObfuscator, logFn func(string, ...interface{})) *VP8DataTunnel {
+	depth := VP8SendQueueDepthFromEnv()
 	return &VP8DataTunnel{
 		track:     track,
 		obf:       obf,
 		logFn:     logFn,
 		stopCh:    make(chan struct{}),
-		sendQueue: make(chan []byte, vp8SendQueue),
+		sendQueue: make(chan []byte, depth),
 		cfgChan:   make(chan struct{}, 1),
 		fps:       DefaultVP8FPS,
 		batch:     DefaultVP8Batch,
@@ -92,9 +95,18 @@ func (t *VP8DataTunnel) SendData(data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	payload := make([]byte, len(data))
+	copy(payload, data)
 	select {
-	case t.sendQueue <- data:
+	case t.sendQueue <- payload:
+		t.queueLen.Add(1)
 	case <-t.stopCh:
+	default:
+		n := t.droppedSend.Add(1)
+		if t.logFn != nil && (n == 1 || n%100 == 0) {
+			t.logFn("vp8: sendQueue full, dropped frame (total drops=%d, depth=%d cap=%d)",
+				n, t.queueLen.Load(), cap(t.sendQueue))
+		}
 	}
 }
 
@@ -147,12 +159,51 @@ func (t *VP8DataTunnel) currentIntervals() (sampleInterval time.Duration, keepal
 	return
 }
 
+func (t *VP8DataTunnel) encodeSample(data []byte) []byte {
+	if t.obf != nil {
+		return t.obf.EncodeData(data)
+	}
+	return data
+}
+
+func (t *VP8DataTunnel) logSent(n uint64, size int) {
+	if t.logFn == nil {
+		return
+	}
+	if size >= vp8LargeSampleBytes || n <= 5 || n%500 == 0 {
+		t.logFn("vp8: sent #%d %d bytes", n, size)
+	}
+}
+
+func (t *VP8DataTunnel) logRecv(n uint64, size int) {
+	if t.logFn == nil {
+		return
+	}
+	if size >= vp8LargeSampleBytes || n <= 5 || n%500 == 0 {
+		t.logFn("vp8: recv #%d %d bytes", n, size)
+	}
+}
+
+func (t *VP8DataTunnel) writeSample(sample []byte, dur time.Duration) {
+	if len(sample) == 0 {
+		return
+	}
+	if err := t.track.WriteSample(media.Sample{Data: sample, Duration: dur}); err != nil {
+		if t.logFn != nil {
+			t.logFn("vp8: WriteSample: %v", err)
+		}
+		return
+	}
+	n := t.sentFrames.Add(1)
+	t.logSent(n, len(sample))
+}
+
 func (t *VP8DataTunnel) writerLoop() {
 	for {
 		sampleInterval, keepaliveEvery, fps, batch := t.currentIntervals()
 		if t.logFn != nil {
-			t.logFn("vp8: writer fps=%d batch=%d interval=%s keepaliveEvery=%d",
-				fps, batch, sampleInterval, keepaliveEvery)
+			t.logFn("vp8: writer fps=%d batch=%d interval=%s keepaliveEvery=%d queueCap=%d",
+				fps, batch, sampleInterval, keepaliveEvery, cap(t.sendQueue))
 		}
 
 		ticker := time.NewTicker(sampleInterval)
@@ -167,37 +218,35 @@ func (t *VP8DataTunnel) writerLoop() {
 			case <-t.cfgChan:
 				reconfigure = true
 			case <-ticker.C:
-				var sample []byte
-				select {
-				case data := <-t.sendQueue:
-					if t.obf != nil {
-						sample = t.obf.EncodeData(data)
-					} else {
-						sample = data
-					}
-					idleTicks = 0
-				default:
-					idleTicks++
-					if idleTicks < keepaliveEvery {
-						continue
-					}
-					idleTicks = 0
-					if t.obf != nil {
-						sample = t.obf.EncodeKeepalive()
-					}
+				sentThisTick := 0
+				maxBurst := batch
+				if maxBurst < 1 {
+					maxBurst = 1
 				}
-				if len(sample) == 0 {
+				for sentThisTick < maxBurst {
+					var sample []byte
+					select {
+					case data := <-t.sendQueue:
+						t.queueLen.Add(-1)
+						sample = t.encodeSample(data)
+						sentThisTick++
+						idleTicks = 0
+					default:
+						goto afterBurst
+					}
+					t.writeSample(sample, sampleInterval)
+				}
+			afterBurst:
+				if sentThisTick > 0 {
 					continue
 				}
-				if err := t.track.WriteSample(media.Sample{Data: sample, Duration: sampleInterval}); err != nil {
-					if t.logFn != nil {
-						t.logFn("vp8: WriteSample: %v", err)
-					}
+				idleTicks++
+				if idleTicks < keepaliveEvery {
 					continue
 				}
-				n := t.sentFrames.Add(1)
-				if t.logFn != nil && (n <= 5 || n%500 == 0) {
-					t.logFn("vp8: sent #%d %d bytes", n, len(sample))
+				idleTicks = 0
+				if t.obf != nil {
+					t.writeSample(t.obf.EncodeKeepalive(), sampleInterval)
 				}
 			}
 		}
@@ -223,9 +272,7 @@ func (t *VP8DataTunnel) HandleFrame(frame []byte) {
 		return
 	}
 	n := t.recvFrames.Add(1)
-	if t.logFn != nil && (n <= 5 || n%500 == 0) {
-		t.logFn("vp8: recv #%d %d bytes", n, len(res.Payload))
-	}
+	t.logRecv(n, len(res.Payload))
 	if t.OnData != nil {
 		t.OnData(res.Payload)
 	}

@@ -108,7 +108,7 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
 		logx.L("creator", "ICE %s", st.String())
 		if st == webrtc.ICEConnectionStateConnected || st == webrtc.ICEConnectionStateCompleted {
-			go vkwebrtc.LogSelectedICEPair(pc, "creator")
+			vkwebrtc.ScheduleICEPairLogging(pc, "creator")
 		}
 	})
 
