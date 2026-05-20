@@ -96,15 +96,14 @@ func (p *P2PHandler) OnTransmittedData(data map[string]interface{}) {
 				log.Printf("[p2p] SetRemoteDescription(answer) failed: %v", err)
 			}
 		case "offer":
+			// The joiner reaches the offerer role only when it asks for an ICE
+			// restart. Reject the offer if we ourselves are still mid-negotiation.
 			sigState := p.bridge.session.SignalingState()
-			if sigState == webrtc.SignalingStateHaveLocalOffer {
-				log.Println("[p2p] Remote offer while local offer pending — accepting remote (ICE restart / rejoin)")
-			} else if sigState != webrtc.SignalingStateStable {
-				log.Printf("[p2p] Ignoring offer — signaling state %s", sigState.String())
+			if sigState != webrtc.SignalingStateStable {
+				log.Printf("[p2p] Ignoring offer — signaling state %s != stable", sigState.String())
 				return
-			} else {
-				log.Println("[p2p] ICE restart offer received from joiner, answering")
 			}
+			log.Println("[p2p] ICE restart offer received from joiner, answering")
 			if err := p.bridge.session.SetRemoteDescription(webrtc.SDPTypeOffer, sdpStr); err != nil {
 				log.Printf("[p2p] SetRemoteDescription(offer) failed: %v", err)
 				return

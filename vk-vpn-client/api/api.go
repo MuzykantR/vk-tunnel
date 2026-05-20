@@ -185,21 +185,6 @@ func GetActiveBypassIPs() []string {
 	return activeJoiner.GetBypassIPs()
 }
 
-// IsICEConnected returns true when the active joiner's ICE agent is up.
-func IsICEConnected() bool {
-	if activeJoiner == nil {
-		return false
-	}
-	return activeJoiner.IsICEConnected()
-}
-
-// NotifyDefaultRouteActive tells the joiner that split default routes are installed.
-func NotifyDefaultRouteActive() {
-	if activeJoiner != nil {
-		activeJoiner.SetDefaultRouteReady()
-	}
-}
-
 // IceStable returns a channel that closes the first time the active joiner's
 // ICE agent has been continuously connected/completed for at least 1 second.
 // Returns a closed channel if no joiner is active so callers don't block forever.

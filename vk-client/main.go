@@ -161,34 +161,16 @@ func (a *App) Connect(uri string) error {
 		a.partialTeardown()
 		return fmt.Errorf("ICE did not stabilize: %w", err)
 	}
-	flushBypass := func(label string) {
-		for _, ip := range clientAPI.GetActiveBypassIPs() {
-			wintun.AddBypassRoute(ip, a.defaultGW)
-		}
-		log.Printf("Bypass routes flushed (%s)", label)
-	}
-
 	log.Println("ICE stable — flushing bypass routes before default redirect")
-	flushBypass("pre-redirect")
-	time.Sleep(2 * time.Second)
-	if !clientAPI.IsICEConnected() {
-		a.partialTeardown()
-		return fmt.Errorf("ICE dropped before default redirect")
+	for _, ip := range clientAPI.GetActiveBypassIPs() {
+		wintun.AddBypassRoute(ip, a.defaultGW)
 	}
+	time.Sleep(2 * time.Second)
 
 	log.Println("Redirecting default traffic through tunnel (WLVPN)...")
 	if err := wintun.RedirectDefaultTraffic(tunName); err != nil {
 		a.partialTeardown()
 		return err
-	}
-	flushBypass("post-redirect")
-	clientAPI.NotifyDefaultRouteActive()
-	time.Sleep(1 * time.Second)
-	if !clientAPI.IsICEConnected() {
-		log.Println("ICE lost right after default redirect — rolling back split routes")
-		wintun.CleanupRouting(tunName)
-		a.partialTeardown()
-		return fmt.Errorf("ICE disconnected immediately after route redirect (check bypass /32 for peer IP)")
 	}
 
 	a.connected = true
