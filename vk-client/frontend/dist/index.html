@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Partizan VPN</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg-mesh" aria-hidden="true"></div>
+
+    <div class="app-container">
+        <header class="app-header">
+            <div class="logo">
+                <div class="logo-icon" aria-hidden="true">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L4 6V11.5C4 16.52 7.58 21.24 12 22C16.42 21.24 20 16.52 20 11.5V6L12 2Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
+                        <path d="M9 12L11 14L15 10" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="logo-title">Partizan VPN</span>
+                    <span class="logo-sub">Stealth WebRTC</span>
+                </div>
+            </div>
+            <div class="status-badge" id="statusBadge" data-state="disconnected">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Отключено</span>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <section class="card">
+                <div class="card-hero">
+                    <h1 class="card-title">Безопасный туннель</h1>
+                    <p class="card-desc">
+                        Вставьте ссылку <code>myvpn://</code> из Telegram-бота. Трафик маскируется под WebRTC-звонок VK.
+                    </p>
+                </div>
+
+                <label class="field-label" for="uriInput">Ключ подключения</label>
+                <div class="input-row">
+                    <div class="input-wrap">
+                        <span class="input-prefix" aria-hidden="true">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <input type="text" id="uriInput" placeholder="myvpn://v1:..." autocomplete="off" spellcheck="false">
+                    </div>
+                    <button type="button" class="btn-icon" id="pasteBtn" title="Вставить из буфера" onclick="onPaste()">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v10a2 2 0 002 2h2" stroke="currentColor" stroke-width="2"/></svg>
+                    </button>
+                </div>
+
+                <div class="button-group">
+                    <button type="button" class="btn btn-primary" id="connectBtn" onclick="onConnect()">
+                        <span class="btn-label">Подключиться</span>
+                    </button>
+                    <button type="button" class="btn btn-danger" id="disconnectBtn" onclick="onDisconnect()" hidden>Отключиться</button>
+                </div>
+
+                <ul class="hints" aria-label="Подсказки">
+                    <li>Запускайте приложение от имени администратора</li>
+                    <li>При капче VK откроется браузер — пройдите проверку и ждите</li>
+                </ul>
+
+                <div class="log-panel">
+                    <div class="log-header">
+                        <span>Журнал</span>
+                        <button type="button" class="log-clear" id="clearLogBtn" onclick="clearLog()">Очистить</button>
+                    </div>
+                    <div class="log-container" id="logContainer">
+                        <div id="logOutput" class="log-output">
+                            <p class="log-empty">События подключения появятся здесь…</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="app-footer">
+            <span>WLVPN · gVisor · VK WebRTC</span>
+        </footer>
+    </div>
+
+    <script>
+        var logEmptyEl = null;
+
+        function ensureLogEmptyRemoved() {
+            var out = document.getElementById('logOutput');
+            var empty = out.querySelector('.log-empty');
+            if (empty) empty.remove();
+        }
+
+        function logMsg(msg, isError) {
+            ensureLogEmptyRemoved();
+            var out = document.getElementById('logOutput');
+            var el = document.createElement('div');
+            el.className = isError ? 'log-line error' : 'log-line';
+            var time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            el.innerHTML = '<span class="log-time">' + time + '</span><span class="log-text">' + escapeHtml(msg) + '</span>';
+            out.appendChild(el);
+            var container = document.getElementById('logContainer');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function escapeHtml(s) {
+            var d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function clearLog() {
+            var out = document.getElementById('logOutput');
+            out.innerHTML = '<p class="log-empty">События подключения появятся здесь…</p>';
+        }
+
+        function setStatus(state, text) {
+            var badge = document.getElementById('statusBadge');
+            badge.dataset.state = state;
+            document.getElementById('statusDot').className = 'status-dot' + (state === 'connecting' || state === 'connected' ? ' ' + state : '');
+            document.getElementById('statusText').innerText = text;
+        }
+
+        function setConnectingState() {
+            document.getElementById('connectBtn').disabled = true;
+            document.getElementById('connectBtn').querySelector('.btn-label').innerText = 'Подключение…';
+            document.getElementById('pasteBtn').disabled = true;
+            setStatus('connecting', 'Подключение…');
+        }
+
+        function setConnectedState() {
+            document.getElementById('connectBtn').hidden = true;
+            document.getElementById('disconnectBtn').hidden = false;
+            document.getElementById('uriInput').disabled = true;
+            document.getElementById('pasteBtn').disabled = true;
+            setStatus('connected', 'Подключено');
+            logMsg('Туннель установлен.');
+        }
+
+        function setDisconnectedState() {
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('connectBtn').hidden = false;
+            document.getElementById('connectBtn').querySelector('.btn-label').innerText = 'Подключиться';
+            document.getElementById('disconnectBtn').hidden = true;
+            document.getElementById('uriInput').disabled = false;
+            document.getElementById('pasteBtn').disabled = false;
+            setStatus('disconnected', 'Отключено');
+        }
+
+        function onPaste() {
+            if (!navigator.clipboard || !navigator.clipboard.readText) {
+                logMsg('Вставка из буфера недоступна — вставьте вручную (Ctrl+V).', true);
+                return;
+            }
+            navigator.clipboard.readText()
+                .then(function(text) {
+                    if (text && text.trim()) {
+                        document.getElementById('uriInput').value = text.trim();
+                        logMsg('Ссылка вставлена из буфера.');
+                    }
+                })
+                .catch(function() {
+                    logMsg('Не удалось прочитать буфер обмена.', true);
+                });
+        }
+
+        function onConnect() {
+            var uri = document.getElementById('uriInput').value.trim();
+            if (!uri) {
+                logMsg('Введите ссылку myvpn:// из бота.', true);
+                document.getElementById('uriInput').focus();
+                return;
+            }
+
+            setConnectingState();
+            logMsg('Инициализация подключения…');
+            logMsg('При проверке VK откроется окно браузера.');
+
+            if (!window.go || !window.go.main || !window.go.main.App) {
+                logMsg('Среда Wails не найдена. Запустите собранное приложение.', true);
+                setDisconnectedState();
+                return;
+            }
+
+            window.go.main.App.Connect(uri)
+                .then(function() { setConnectedState(); })
+                .catch(function(err) {
+                    logMsg('Ошибка: ' + err, true);
+                    setDisconnectedState();
+                });
+        }
+
+        function onDisconnect() {
+            logMsg('Отключение…');
+            if (window.go && window.go.main && window.go.main.App) {
+                window.go.main.App.Disconnect()
+                    .then(function() {
+                        setDisconnectedState();
+                        logMsg('Отключено.');
+                    })
+                    .catch(function(err) {
+                        logMsg('Ошибка отключения: ' + err, true);
+                        setDisconnectedState();
+                    });
+            } else {
+                setDisconnectedState();
+            }
+        }
+
+        document.getElementById('uriInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !document.getElementById('connectBtn').disabled) onConnect();
+        });
+    </script>
+</body>
+</html>
