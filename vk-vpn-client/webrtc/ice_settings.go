@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	pion "github.com/pion/webrtc/v3"
@@ -34,9 +35,29 @@ func RelayAcceptanceMinWait() time.Duration {
 	return defaultRelayAcceptanceWait
 }
 
-// ApplyICEPerformanceSettings tunes pion ICE for throughput (WLB-style: prefer direct/srflx over relay).
-func ApplyICEPerformanceSettings(se *pion.SettingEngine) {
+// ICETransportPolicyFromEnv selects ICE candidate policy.
+//
+// Testing default (until release): relay — TURN only, matches whitelist/campus path.
+// Prod / pion auto: set VK_VPN_ICE_TRANSPORT_POLICY=all (or auto|pion).
+func ICETransportPolicyFromEnv() pion.ICETransportPolicy {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("VK_VPN_ICE_TRANSPORT_POLICY"))) {
+	case "all", "auto", "pion":
+		logx.L("ice", "ICETransportPolicy=all (pion auto: host/srflx/prflx/relay)")
+		return pion.ICETransportPolicyAll
+	default:
+		logx.L("ice", "ICETransportPolicy=relay (TURN only — testing default; release: VK_VPN_ICE_TRANSPORT_POLICY=all)")
+		return pion.ICETransportPolicyRelay
+	}
+}
+
+// ApplyICEPerformanceSettings tunes pion ICE. With relay-only policy, pion has no direct
+// pairs to prefer — RelayAcceptanceMinWait is skipped.
+func ApplyICEPerformanceSettings(se *pion.SettingEngine, policy pion.ICETransportPolicy) {
+	if policy == pion.ICETransportPolicyRelay {
+		logx.L("ice", "RelayAcceptanceMinWait skipped (ICETransportPolicy=relay)")
+		return
+	}
 	wait := RelayAcceptanceMinWait()
 	se.SetRelayAcceptanceMinWait(wait)
-	logx.L("ice", "RelayAcceptanceMinWait=%s (direct host/srflx preferred before relay)", wait)
+	logx.L("ice", "RelayAcceptanceMinWait=%s (pion may pick host/srflx before relay)", wait)
 }

@@ -75,7 +75,8 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	se.SetSCTPMaxReceiveBufferSize(8 * 1024 * 1024)
 	se.EnableSCTPZeroChecksum(true)
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
-	vkwebrtc.ApplyICEPerformanceSettings(&se)
+	icePolicy := vkwebrtc.ICETransportPolicyFromEnv()
+	vkwebrtc.ApplyICEPerformanceSettings(&se, icePolicy)
 	// Custom API must register codecs explicitly — otherwise AddTrack/CreateOffer
 	// fail with "RTPSender created with no codecs" (client joiner does the same).
 	me := &webrtc.MediaEngine{}
@@ -84,7 +85,10 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
 
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
+		ICEServers:         ice,
+		ICETransportPolicy: icePolicy,
+	})
 	if err != nil {
 		return nil, err
 	}

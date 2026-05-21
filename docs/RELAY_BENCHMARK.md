@@ -19,11 +19,13 @@
 
 ## Env
 
-| Переменная | По умолчанию | Назначение |
-|------------|--------------|------------|
-| `VK_VPN_ICE_RELAY_WAIT` | 8s | Pion: задержка выбора TURN |
-| `VK_VPN_ICE_PREFER_DIRECT_WAIT` | 3s | Ожидание direct перед redirect (короткое!) |
-| `VK_VPN_ICE_PREFER_DIRECT_WAIT=0` | — | Сразу redirect на relay |
+| Переменная | По умолчанию (тест) | Назначение |
+|------------|---------------------|------------|
+| `VK_VPN_ICE_TRANSPORT_POLICY` | **relay** (в коде) | TURN-only на время тестов; релиз: default `all` (pion auto) |
+| `VK_VPN_ICE_TRANSPORT_POLICY=all` | — | Временно вернуть pion auto (host/srflx/prflx) |
+| `VK_VPN_ICE_RELAY_WAIT` | 8s | Только при `policy=all`: pion ждёт direct |
+| `VK_VPN_ICE_PREFER_DIRECT_WAIT` | 3s | Ожидание direct перед redirect (только при direct ICE) |
+| `VK_VPN_ICE_PREFER_DIRECT_WAIT=0` | — | Сразу redirect |
 
 ## Ожидаемая скорость (relay + VP8)
 

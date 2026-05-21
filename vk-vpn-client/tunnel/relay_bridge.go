@@ -147,8 +147,7 @@ func (rb *RelayBridge) handleJoinerMessage(connID uint32, msgType byte, payload 
 		default:
 		}
 	case MsgData:
-		sc.lastDataNs.Store(time.Now().UnixNano())
-		sc.conn.Write(payload)
+		sc.deliverToApp(payload)
 	case MsgClose:
 		go rb.closeJoinerAfterInboundDrain(sc, connID)
 	case MsgPing, MsgPong:
@@ -249,6 +248,7 @@ func (rb *RelayBridge) closeJoinerAfterInboundDrain(sc *socksConn, connID uint32
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	sc.stopAppWriter()
 	sc.conn.Close()
 	rb.conns.Delete(connID)
 	if _, ok := rb.tunnel.(OutboundQueued); ok {
@@ -296,12 +296,53 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 	rb.closeRelayTCP(connID)
 }
 
+const socksToAppQueue = 512
+
 type socksConn struct {
 	id         uint32
 	conn       net.Conn
 	rb         *RelayBridge
 	rdy        chan error
 	lastDataNs atomic.Int64
+	toApp      chan []byte
+	appOnce    sync.Once
+}
+
+func (sc *socksConn) startAppWriter() {
+	sc.appOnce.Do(func() {
+		sc.toApp = make(chan []byte, socksToAppQueue)
+		go func() {
+			for payload := range sc.toApp {
+				if _, err := sc.conn.Write(payload); err != nil {
+					return
+				}
+				sc.lastDataNs.Store(time.Now().UnixNano())
+			}
+		}()
+	})
+}
+
+func (sc *socksConn) deliverToApp(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	sc.startAppWriter()
+	p := make([]byte, len(payload))
+	copy(p, payload)
+	select {
+	case sc.toApp <- p:
+	default:
+		// Never drop bulk download bytes — block until queue drains.
+		sc.toApp <- p
+	}
+}
+
+func (sc *socksConn) stopAppWriter() {
+	if sc.toApp == nil {
+		return
+	}
+	close(sc.toApp)
+	sc.toApp = nil
 }
 
 func (rb *RelayBridge) Close() {
@@ -377,6 +418,7 @@ func (rb *RelayBridge) handleSOCKS(conn net.Conn) {
 
 	id := rb.nextID.Add(1)
 	sc := &socksConn{id: id, conn: conn, rb: rb, rdy: make(chan error, 1)}
+	sc.startAppWriter()
 	rb.conns.Store(id, sc)
 	rb.send(id, MsgConnect, []byte(host))
 
@@ -404,6 +446,7 @@ func (rb *RelayBridge) handleSOCKS(conn net.Conn) {
 				rb.send(id, MsgData, readBuf[:rn])
 			}
 			if rerr != nil {
+				sc.stopAppWriter()
 				rb.send(id, MsgClose, nil)
 				rb.conns.Delete(id)
 				return

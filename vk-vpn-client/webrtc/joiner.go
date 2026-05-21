@@ -399,12 +399,16 @@ func (j *Joiner) initPC() {
 	// Skip per-packet SCTP checksum — pion supports this opt-in for ~10%
 	// CPU / latency win and DTLS already authenticates every frame.
 	se.EnableSCTPZeroChecksum(true)
-	ApplyICEPerformanceSettings(&se)
+	icePolicy := ICETransportPolicyFromEnv()
+	ApplyICEPerformanceSettings(&se, icePolicy)
 
 	me := &webrtc.MediaEngine{}
 	me.RegisterDefaultCodecs()
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: ice})
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
+		ICEServers:         ice,
+		ICETransportPolicy: icePolicy,
+	})
 	if err != nil {
 		log.Printf("Joiner: PC failed: %v", err)
 		return
