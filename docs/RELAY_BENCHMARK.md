@@ -26,6 +26,14 @@
 | `VK_VPN_ICE_RELAY_WAIT` | 8s | Только при `policy=all`: pion ждёт direct |
 | `VK_VPN_ICE_PREFER_DIRECT_WAIT` | 3s | Ожидание direct перед redirect (только при direct ICE) |
 | `VK_VPN_ICE_PREFER_DIRECT_WAIT=0` | — | Сразу redirect |
+| `VK_VPN_EXTRA_BYPASS_IPS` | — | **Обязательно для SSH к VPS** при relay-only, напр. `185.103.101.245` |
+
+### SSH / journalctl при включённом VPN
+
+При `ICETransportPolicy=relay` в bypass попадают только TURN IP (90.156.x), **не** IP вашего VPS.  
+Трафик `ssh user@185.103.x` уходит **внутрь VPN** → broken pipe, зависание терминала.
+
+**Решение:** перед Connect задать `VK_VPN_EXTRA_BYPASS_IPS=<IP VPS>` или отключать VPN для SSH.
 
 ## Ожидаемая скорость (relay + VP8)
 

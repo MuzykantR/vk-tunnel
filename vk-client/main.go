@@ -119,6 +119,11 @@ func (a *App) Connect(uri string) error {
 		log.Printf("Warning: failed to set MTU: %v", err)
 	}
 
+	extraBypass := extraBypassIPsFromEnv()
+	if len(extraBypass) > 0 {
+		log.Printf("Extra bypass IPs (VK_VPN_EXTRA_BYPASS_IPS): %v", extraBypass)
+		knownBypassIPs = append(knownBypassIPs, extraBypass...)
+	}
 	log.Println("Installing bypass /32 routes for all known TURN/STUN/API hosts...")
 	if err := wintun.SetupRoutingLoopBypass(a.defaultGW, knownBypassIPs); err != nil {
 		a.partialTeardown()
@@ -151,6 +156,9 @@ func (a *App) Connect(uri string) error {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
 		for _, ip := range clientAPI.ICEBypassIPs() {
+			wintun.AddBypassRoute(ip, a.defaultGW)
+		}
+		for _, ip := range extraBypass {
 			wintun.AddBypassRoute(ip, a.defaultGW)
 		}
 		log.Printf("Bypass routes flushed (%s)", label)
@@ -303,6 +311,24 @@ func (a *App) partialTeardown() {
 	wintun.RemoveAdapter(adapterName)
 	a.bypassSink = nil
 	a.connected = false
+}
+
+// extraBypassIPsFromEnv — /32 в обход TUN (SSH к VPS, админ-хосты).
+// Пример: VK_VPN_EXTRA_BYPASS_IPS=185.103.101.245
+// При ICE relay-only IP VPS не попадает в nominated pair → без этого SSH/journalctl ломаются.
+func extraBypassIPsFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("VK_VPN_EXTRA_BYPASS_IPS"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		ip := strings.TrimSpace(part)
+		if ip != "" {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 func main() {

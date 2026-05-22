@@ -68,4 +68,5 @@ VK_VPN_ICE_TRANSPORT_POLICY=all
 | `VK_VPN_ICE_PREFER_DIRECT_WAIT` | 3s | Redirect: ждать direct pair stats |
 | `VK_VPN_ICE_TRANSPORT_POLICY` | *(тест: relay)* | `all` = pion auto |
 
-Док бенчмарка: [RELAY_BENCHMARK.md](./RELAY_BENCHMARK.md).
+Док бенчмарка: [RELAY_BENCHMARK.md](./RELAY_BENCHMARK.md).  
+Частичные загрузки / VP8: [VP8_PARTIAL_DOWNLOAD_PROBLEM.md](../../docs/VP8_PARTIAL_DOWNLOAD_PROBLEM.md).
