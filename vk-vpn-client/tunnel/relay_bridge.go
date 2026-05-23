@@ -20,7 +20,11 @@ type udpClient struct {
 type relayTCP struct {
 	conn net.Conn
 	addr string
-	rx   int64
+	// rx/tx are atomic — origin→joiner is incremented by the read loop,
+	// origin←joiner is incremented by handleCreatorMessage::MsgData, both
+	// concurrently with the logging path in closeRelayTCP.
+	rx atomic.Int64
+	tx atomic.Int64
 }
 
 type RelayBridge struct {
@@ -183,7 +187,8 @@ func (rb *RelayBridge) handleCreatorMessage(connID uint32, msgType byte, payload
 			return
 		}
 		if rc, ok := val.(*relayTCP); ok {
-			rc.conn.Write(payload)
+			n, _ := rc.conn.Write(payload)
+			rc.tx.Add(int64(n))
 		} else if c, ok := val.(net.Conn); ok {
 			c.Write(payload)
 		}
@@ -201,7 +206,13 @@ func (rb *RelayBridge) closeRelayTCP(connID uint32) bool {
 	switch v := val.(type) {
 	case *relayTCP:
 		v.conn.Close()
-		logx.DCClose(connID, v.addr, 0, v.rx)
+		logx.DCClose(connID, v.addr, v.tx.Load(), v.rx.Load())
+	case *socksConn:
+		// Joiner-side connection — go through the idempotent close path
+		// so the writer goroutine and any in-flight deliverToApp callers
+		// exit cleanly. Without this, RelayBridge.Close() would leak
+		// socksConn goroutines.
+		v.close()
 	case net.Conn:
 		v.Close()
 	}
@@ -248,12 +259,12 @@ func (rb *RelayBridge) closeJoinerAfterInboundDrain(sc *socksConn, connID uint32
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	sc.stopAppWriter()
-	sc.conn.Close()
+	// Remove from the map FIRST so any in-flight handleJoinerMessage path
+	// (Load→deliverToApp) misses cleanly. Then sc.close() is idempotent and
+	// signals the writer goroutine + tears down the TCP conn.
 	rb.conns.Delete(connID)
-	if _, ok := rb.tunnel.(OutboundQueued); ok {
-		rb.logFn("relay: joiner close id=%d after inbound grace", connID)
-	}
+	sc.close()
+	rb.logFn("relay: joiner close id=%d after inbound grace", connID)
 }
 
 func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
@@ -277,7 +288,7 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			rc.rx += int64(n)
+			rc.rx.Add(int64(n))
 			rb.send(connID, MsgData, buf[:n])
 		}
 		if err != nil {
@@ -285,15 +296,33 @@ func (rb *RelayBridge) connectTCP(connID uint32, addr string) {
 		}
 	}
 
+	// Drain whatever the tunnel still has queued before announcing close,
+	// so the joiner reads everything we wrote into the sendQueue (VP8 mode;
+	// in DC mode WaitOutboundDrain returns 0 immediately).
 	pending := WaitOutboundDrain(rb.tunnel, RelayDrainTimeoutFromEnv())
 	if pending > 0 {
-		rb.logFn("relay: close id=%d %s rx=%d vp8_pending=%d (drain timeout)", connID, addr, rc.rx, pending)
-	} else if _, ok := rb.tunnel.(OutboundQueued); ok {
-		rb.logFn("relay: close id=%d %s rx=%d vp8_pending=0 flushed=1", connID, addr, rc.rx)
+		rb.logFn("relay: close id=%d %s rx=%d tunnel_pending=%d (drain timeout)", connID, addr, rc.rx.Load(), pending)
+	} else {
+		rb.logFn("relay: close id=%d %s rx=%d tunnel_pending=0 flushed=1", connID, addr, rc.rx.Load())
 	}
 
+	// Origin → joiner half-close: tell the joiner first (its SOCKS app
+	// sees EOF), then send FIN on our write side to origin so its stack
+	// can flush remaining ACKs. We keep the joiner→origin direction open
+	// until the joiner's own MsgClose arrives (handleCreatorMessage →
+	// closeRelayTCP) or until RelayDrainTimeout expires.
 	rb.send(connID, MsgClose, nil)
-	rb.closeRelayTCP(connID)
+	if tcpConn, ok := rc.conn.(*net.TCPConn); ok {
+		tcpConn.CloseWrite()
+	}
+	drainDeadline := time.Now().Add(RelayDrainTimeoutFromEnv())
+	for time.Now().Before(drainDeadline) {
+		if _, stillThere := rb.conns.Load(connID); !stillThere {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	rb.closeRelayTCP(connID) // idempotent — joiner's MsgClose may have already done this
 }
 
 const socksToAppQueue = 512
@@ -304,45 +333,85 @@ type socksConn struct {
 	rb         *RelayBridge
 	rdy        chan error
 	lastDataNs atomic.Int64
-	toApp      chan []byte
-	appOnce    sync.Once
+
+	// Lifecycle: doneCh is closed exactly once via closeOnce at teardown.
+	// deliverToApp races against close() and uses doneCh as the drop/exit
+	// signal — we never close(toApp) directly because the send-on-closed
+	// race panics. The writer goroutine (appWriterLoop) drains residue on
+	// shutdown and itself triggers close() via defer, so any exit path is
+	// idempotent.
+	toApp     chan []byte
+	doneCh    chan struct{}
+	closeOnce sync.Once
 }
 
-func (sc *socksConn) startAppWriter() {
-	sc.appOnce.Do(func() {
-		sc.toApp = make(chan []byte, socksToAppQueue)
-		go func() {
-			for payload := range sc.toApp {
-				if _, err := sc.conn.Write(payload); err != nil {
+// initAppWriter wires the bounded queue and starts the drain goroutine.
+// Must be called exactly once at SOCKS handshake (handleSOCKS) — before
+// any deliverToApp call.
+func (sc *socksConn) initAppWriter() {
+	sc.toApp = make(chan []byte, socksToAppQueue)
+	sc.doneCh = make(chan struct{})
+	go sc.appWriterLoop()
+}
+
+func (sc *socksConn) appWriterLoop() {
+	// On any exit (Write error, shutdown), ensure doneCh is closed so
+	// deliverToApp callers unblock instead of deadlocking on a full queue.
+	defer sc.close()
+	for {
+		select {
+		case <-sc.doneCh:
+			// Best-effort drain of whatever's already queued, then exit.
+			// Write errors are silently ignored — conn is already torn down.
+			for {
+				select {
+				case payload := <-sc.toApp:
+					sc.conn.Write(payload)
+				default:
 					return
 				}
-				sc.lastDataNs.Store(time.Now().UnixNano())
 			}
-		}()
-	})
+		case payload := <-sc.toApp:
+			if _, err := sc.conn.Write(payload); err != nil {
+				return
+			}
+			sc.lastDataNs.Store(time.Now().UnixNano())
+		}
+	}
 }
 
 func (sc *socksConn) deliverToApp(payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
-	sc.startAppWriter()
+	// Fast path: if already torn down, drop. The send-select below covers
+	// the race window (close happening between this check and the send).
+	select {
+	case <-sc.doneCh:
+		return
+	default:
+	}
 	p := make([]byte, len(payload))
 	copy(p, payload)
+	// Block on send, but always exit on doneCh — never deadlock on a dead
+	// conn. Backpressure here naturally throttles the VP8/DC reader when
+	// the SOCKS app (curl) is slow.
 	select {
 	case sc.toApp <- p:
-	default:
-		// Never drop bulk download bytes — block until queue drains.
-		sc.toApp <- p
+	case <-sc.doneCh:
 	}
 }
 
-func (sc *socksConn) stopAppWriter() {
-	if sc.toApp == nil {
-		return
-	}
-	close(sc.toApp)
-	sc.toApp = nil
+// close signals shutdown and tears down the TCP conn. Idempotent — safe
+// to call from MsgClose handler, from the SOCKS read loop on app-side
+// EOF, from appWriterLoop's defer on Write error, and from
+// RelayBridge.Close() concurrently. Never closes sc.toApp directly
+// (that would race with deliverToApp callers in flight).
+func (sc *socksConn) close() {
+	sc.closeOnce.Do(func() {
+		close(sc.doneCh)
+		sc.conn.Close()
+	})
 }
 
 func (rb *RelayBridge) Close() {
@@ -417,8 +486,14 @@ func (rb *RelayBridge) handleSOCKS(conn net.Conn) {
 	}
 
 	id := rb.nextID.Add(1)
-	sc := &socksConn{id: id, conn: conn, rb: rb, rdy: make(chan error, 1)}
-	sc.startAppWriter()
+	sc := &socksConn{
+		id:     id,
+		conn:   conn,
+		rb:     rb,
+		rdy:    make(chan error, 1),
+		doneCh: make(chan struct{}),
+	}
+	sc.initAppWriter()
 	rb.conns.Store(id, sc)
 	rb.send(id, MsgConnect, []byte(host))
 
@@ -426,14 +501,14 @@ func (rb *RelayBridge) handleSOCKS(conn net.Conn) {
 	case rdyErr := <-sc.rdy:
 		if rdyErr != nil {
 			conn.Write(socks.ConnFail)
-			conn.Close()
 			rb.conns.Delete(id)
+			sc.close()
 			return
 		}
 	case <-time.After(20 * time.Second):
 		conn.Write(socks.ConnFail)
-		conn.Close()
 		rb.conns.Delete(id)
+		sc.close()
 		return
 	}
 	conn.Write(socks.OK)
@@ -446,9 +521,11 @@ func (rb *RelayBridge) handleSOCKS(conn net.Conn) {
 				rb.send(id, MsgData, readBuf[:rn])
 			}
 			if rerr != nil {
-				sc.stopAppWriter()
-				rb.send(id, MsgClose, nil)
+				// Delete first so a stale inbound MsgData lookup misses,
+				// then announce close upstream, then tear down locally.
 				rb.conns.Delete(id)
+				rb.send(id, MsgClose, nil)
+				sc.close()
 				return
 			}
 		}

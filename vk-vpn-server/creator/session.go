@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/datachannel"
@@ -30,9 +31,31 @@ const (
 type dcConn struct {
 	conn net.Conn
 	addr string
-	inCh chan []byte
-	tx   int64
-	rx   int64
+
+	// inCh feeds the origin conn.Write goroutine. doneCh is the shutdown
+	// signal — handleDCMessage::MsgData sends via select{inCh|doneCh}, the
+	// writer goroutine exits via doneCh and drains residue. We never close
+	// inCh directly (send-on-closed-chan panics).
+	inCh   chan []byte
+	doneCh chan struct{}
+
+	// tx/rx are atomic because the read loop, the writer goroutine, and
+	// the logging path in closeDCConn race against each other.
+	tx atomic.Int64
+	rx atomic.Int64
+
+	closeOnce sync.Once
+}
+
+// close is idempotent — safe from MsgClose handler, from connectTCP's
+// read-loop exit path, and from closeAllConns concurrently.
+func (dc *dcConn) close() {
+	dc.closeOnce.Do(func() {
+		close(dc.doneCh)
+		dc.conn.Close()
+		// inCh is intentionally NOT closed — would race with a concurrent
+		// `dc.inCh <- cp` in handleDCMessage and panic.
+	})
 }
 
 // SessionOpts — tunables from whitelist-bypass headless --resources / join-link obfuscation.
@@ -336,10 +359,14 @@ func (s *TunnelSession) handleDCMessage(data []byte) {
 		dc := val.(*dcConn)
 		cp := make([]byte, len(payload))
 		copy(cp, payload)
+		// Block until the writer goroutine takes a slot, or until the
+		// conn is being torn down. This gives natural backpressure to the
+		// joiner via SCTP flow control instead of silently dropping bytes
+		// — which is what we were doing before and which broke uploads
+		// under load.
 		select {
 		case dc.inCh <- cp:
-		default:
-			log.Printf("[dc] conn %d inCh full, dropping %d bytes from joiner", connID, len(payload))
+		case <-dc.doneCh:
 		}
 	case MsgClose:
 		s.closeDCConn(connID)
@@ -352,12 +379,8 @@ func (s *TunnelSession) closeDCConn(connID uint32) bool {
 		return false
 	}
 	dc := val.(*dcConn)
-	func() {
-		defer func() { recover() }()
-		close(dc.inCh)
-	}()
-	dc.conn.Close()
-	logx.DCClose(connID, dc.addr, dc.tx, dc.rx)
+	dc.close()
+	logx.DCClose(connID, dc.addr, dc.tx.Load(), dc.rx.Load())
 	return true
 }
 
@@ -440,19 +463,35 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	logx.DCOpen(connID, addr)
 
 	dc := &dcConn{
-		conn: conn,
-		addr: addr,
-		inCh: make(chan []byte, 256),
+		conn:   conn,
+		addr:   addr,
+		inCh:   make(chan []byte, 1024),
+		doneCh: make(chan struct{}),
 	}
 	s.conns.Store(connID, dc)
 	s.sendDCFrame(connID, MsgConnectOK, nil)
 
 	go func() {
-		for data := range dc.inCh {
-			n, _ := conn.Write(data)
-			dc.tx += int64(n)
+		// Drain inCh until shutdown signalled via doneCh. On doneCh, we
+		// best-effort flush whatever's still queued (origin may already
+		// be closed; Write errors are silent). conn.Close() is the
+		// responsibility of dc.close() — never here.
+		for {
+			select {
+			case data := <-dc.inCh:
+				n, _ := conn.Write(data)
+				dc.tx.Add(int64(n))
+			case <-dc.doneCh:
+				for {
+					select {
+					case data := <-dc.inCh:
+						conn.Write(data)
+					default:
+						return
+					}
+				}
+			}
 		}
-		conn.Close()
 	}()
 
 	buf := make([]byte, s.readBuf)
@@ -460,7 +499,7 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 		s.waitDCBackpressure()
 		n, err := conn.Read(buf)
 		if n > 0 {
-			dc.rx += int64(n)
+			dc.rx.Add(int64(n))
 			s.sendDCFrame(connID, MsgData, buf[:n])
 		}
 		if err != nil {
@@ -470,10 +509,29 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 			break
 		}
 	}
-	sctpPending := s.waitSCTPDrain()
-	logx.L("dc", "close id=%d %s tx=%d rx=%d sctp_pending=%d", connID, addr, dc.tx, dc.rx, sctpPending)
+	// Origin closed its write side. Tell the joiner first (so the SOCKS app
+	// sees EOF), then half-close our write to origin so its stack can flush
+	// the final ACKs. inCh stays alive so joiner→origin data still in flight
+	// keeps flowing through the writer goroutine until the joiner sends its
+	// own MsgClose.
 	s.sendDCFrame(connID, MsgClose, nil)
-	s.closeDCConn(connID)
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.CloseWrite()
+	}
+	// Wait for the joiner's MsgClose (which removes connID from s.conns via
+	// closeDCConn → LoadAndDelete) or for the drain timeout. Polling on the
+	// map is acceptable because RelayDrainTimeoutFromEnv() is typically tens
+	// of seconds; tighter signalling can come later if it becomes a hotspot.
+	drainDeadline := time.Now().Add(tunnel.RelayDrainTimeoutFromEnv())
+	for time.Now().Before(drainDeadline) {
+		if _, stillThere := s.conns.Load(connID); !stillThere {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	sctpPending := s.waitSCTPDrain()
+	logx.L("dc", "close id=%d %s tx=%d rx=%d sctp_pending=%d", connID, addr, dc.tx.Load(), dc.rx.Load(), sctpPending)
+	s.closeDCConn(connID) // idempotent — joiner's MsgClose may have already done this
 }
 
 func (s *TunnelSession) waitSCTPDrain() uint64 {
