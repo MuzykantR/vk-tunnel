@@ -3,7 +3,7 @@ package tunnel
 import (
 	"errors"
 	"io"
-	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,11 +27,6 @@ const kcpConvID uint32 = 0x564B5650
 // We mirror the legacy VP8DataTunnel keepalive rate (~100 ms) so the
 // outbound RTP pattern stays close to a real low-bitrate video stream.
 const kcpKeepaliveInterval = 100 * time.Millisecond
-
-// kcpReadPollInterval — KCP session reads block; we use a short deadline
-// so the readLoop can notice stopCh without hanging the whole goroutine
-// on a torn-down session.
-const kcpReadPollInterval = 250 * time.Millisecond
 
 // kcpVP8SampleDuration is the Duration we hand to pion's WriteSample.
 // pion uses it to compute RTP timestamps for the outgoing packetizer.
@@ -194,17 +189,22 @@ func min(a, b time.Duration) time.Duration {
 	return b
 }
 
-// readLoop drains the KCP session into the OnData callback. Blocks
-// inside session.Read with a short deadline so we can poll stopCh.
+// readLoop drains the KCP session into the OnData callback.
+//
+// Implementation note: we use a fully blocking Read here. The previous
+// version polled stopCh with a 250 ms SetReadDeadline, but kcp-go's
+// timeout error is a plain errors.New("timeout") — it does NOT satisfy
+// the net.Error interface, so our timeout-vs-fatal classifier got it
+// wrong and killed the whole tunnel 250 ms after start (see Phase 3b
+// regression in app.log @ 17:23:15.330).
+//
+// With a blocking Read, exit is driven by session.Close() (called from
+// Stop()), which unblocks Read with io.ErrClosedPipe or io.EOF. We also
+// keep a defensive text-match for "timeout" / "closed" so any future
+// kcp-go change can't trap us in a dead-loop of error spam.
 func (t *KCPTunnel) readLoop() {
 	buf := make([]byte, 64*1024)
 	for {
-		select {
-		case <-t.stopCh:
-			return
-		default:
-		}
-		_ = t.session.SetReadDeadline(time.Now().Add(kcpReadPollInterval))
 		n, err := t.session.Read(buf)
 		if n > 0 {
 			t.bytesIn.Add(uint64(n))
@@ -214,29 +214,36 @@ func (t *KCPTunnel) readLoop() {
 				t.onData(cp)
 			}
 		}
-		if err != nil {
-			if isTimeoutErr(err) {
-				continue
-			}
-			if err == io.EOF {
-				t.logFn("kcp: session.Read EOF — closing tunnel")
-			} else {
-				t.logFn("kcp: session.Read err: %v", err)
-			}
+		if err == nil {
+			continue
+		}
+		// Quiet termination paths — the session was closed deliberately
+		// (peer EOF or our own Stop). Log once, exit cleanly.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			t.logFn("kcp: session.Read closed")
 			t.Stop()
 			return
 		}
+		// Defensive: kcp-go's timeout/closed errors are plain strings.
+		// Treat any "timeout" as transient (do not tear down — the next
+		// Read will succeed once a packet arrives). Treat "closed" as
+		// fatal.
+		msg := err.Error()
+		if strings.Contains(msg, "closed") {
+			t.logFn("kcp: session.Read closed: %v", err)
+			t.Stop()
+			return
+		}
+		if strings.Contains(msg, "timeout") {
+			// Should not happen — we no longer set a read deadline —
+			// but if a future kcp-go version reintroduces one we don't
+			// want to die. Just keep looping.
+			continue
+		}
+		t.logFn("kcp: session.Read err: %v — tearing down", err)
+		t.Stop()
+		return
 	}
-}
-
-func isTimeoutErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		return true
-	}
-	return false
 }
 
 // keepaliveLoop maintains a steady "looks like a video call" RTP cadence
@@ -346,20 +353,22 @@ func (t *KCPTunnel) HandleFrame(frame []byte) {
 }
 
 // Stop tears down the KCP session and signals all goroutines. Idempotent.
+// Safe to call from anywhere — readLoop on EOF, RelayBridge teardown,
+// Joiner.Close — even if Start() was never reached.
 func (t *KCPTunnel) Stop() {
-	if !t.running.CompareAndSwap(true, false) {
-		return
-	}
-	t.stopOnce.Do(func() { close(t.stopCh) })
-	if t.session != nil {
-		_ = t.session.Close()
-	}
-	if t.pktConn != nil {
-		_ = t.pktConn.Close()
-	}
-	if t.onClose != nil {
-		t.onClose()
-	}
+	t.stopOnce.Do(func() {
+		t.running.Store(false)
+		close(t.stopCh)
+		if t.session != nil {
+			_ = t.session.Close()
+		}
+		if t.pktConn != nil {
+			_ = t.pktConn.Close()
+		}
+		if t.onClose != nil {
+			t.onClose()
+		}
+	})
 }
 
 func (t *KCPTunnel) SetOnData(fn func([]byte))  { t.onData = fn }
