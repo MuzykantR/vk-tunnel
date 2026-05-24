@@ -109,7 +109,22 @@ func NewKCPTunnel(track *webrtc.TrackLocalStaticSample, obf *TunnelObfuscator, l
 	sess.SetNoDelay(cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion)
 	sess.SetWindowSize(cfg.SendWindow, cfg.RecvWindow)
 	sess.SetMtu(cfg.MTU)
-	sess.SetStreamMode(true)
+	// CRITICAL: message mode (NOT stream).
+	//
+	// RelayBridge.handleTunnelData → DecodeFrames expects each callback
+	// invocation to contain whole frame(s). In stream mode KCP would hand
+	// us arbitrary-sized chunks that straddle frame boundaries, and
+	// DecodeFrames would discard everything past the first partial frame
+	// — silently losing most of the data. We verified this in prod: with
+	// stream mode the server pumped 44 MB into the tunnel, the client
+	// received 44 MB via KCP, and the curl on top got 0 bytes because
+	// every Read() chunk dropped its tail.
+	//
+	// In message mode each SendData() / session.Write() corresponds to
+	// exactly one session.Read() on the peer — frame boundaries hold.
+	// Max message size = 256 segments × MSS ≈ 320 KB, well above our
+	// max frame (≤ readBuf = 65 KB).
+	sess.SetStreamMode(false)
 	sess.SetWriteDelay(cfg.WriteDelay)
 	sess.SetACKNoDelay(cfg.ACKNoDelay)
 	t.session = sess
@@ -203,7 +218,11 @@ func min(a, b time.Duration) time.Duration {
 // keep a defensive text-match for "timeout" / "closed" so any future
 // kcp-go change can't trap us in a dead-loop of error spam.
 func (t *KCPTunnel) readLoop() {
-	buf := make([]byte, 64*1024)
+	// 128 KB read buffer — max KCP message we'll emit is bounded by the
+	// frame size on the writing end (≤ readBuf = 65 KB), but a margin
+	// avoids a short-read scenario if KCP-go's internal reassembly ever
+	// returns more than expected.
+	buf := make([]byte, 128*1024)
 	for {
 		n, err := t.session.Read(buf)
 		if n > 0 {
