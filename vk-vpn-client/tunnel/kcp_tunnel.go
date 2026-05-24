@@ -129,7 +129,10 @@ func NewKCPTunnel(track *webrtc.TrackLocalStaticSample, obf *TunnelObfuscator, l
 	sess.SetACKNoDelay(cfg.ACKNoDelay)
 	t.session = sess
 
-	t.logFn("kcp: tunnel ready conv=0x%08x mtu=%d window=%d/%d fec=%d/%d nodelay=%d,%d,%d,%d",
+	// stream_mode=false is the only correct setting — see SetStreamMode
+	// block above. We log it explicitly so the diagnostic log shows
+	// at-a-glance whether both peers actually agree on framing semantics.
+	t.logFn("kcp: tunnel ready conv=0x%08x mtu=%d window=%d/%d fec=%d/%d nodelay=%d,%d,%d,%d stream_mode=false",
 		kcpConvID, cfg.MTU, cfg.SendWindow, cfg.RecvWindow,
 		cfg.DataShards, cfg.ParityShards,
 		cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion)
@@ -223,10 +226,25 @@ func (t *KCPTunnel) readLoop() {
 	// avoids a short-read scenario if KCP-go's internal reassembly ever
 	// returns more than expected.
 	buf := make([]byte, 128*1024)
+	// Diagnostic: dump head of the first few reads so a mode mismatch
+	// (sender stream / receiver message) is immediately obvious from logs.
+	// A valid frame begins with a 4-byte big-endian length (typically
+	// 5..65540), then 4-byte connID, then 1 msgType byte. If we see e.g.
+	// length > 1 GB or wildly inconsistent magic, peers disagree.
+	const headDumps = 5
+	var headDumpsLeft = headDumps
 	for {
 		n, err := t.session.Read(buf)
 		if n > 0 {
 			t.bytesIn.Add(uint64(n))
+			if headDumpsLeft > 0 {
+				hex := n
+				if hex > 16 {
+					hex = 16
+				}
+				t.logFn("kcp: read#%d n=%d head=% x", headDumps-headDumpsLeft+1, n, buf[:hex])
+				headDumpsLeft--
+			}
 			if t.onData != nil {
 				cp := make([]byte, n)
 				copy(cp, buf[:n])

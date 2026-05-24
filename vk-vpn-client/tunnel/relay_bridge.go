@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -44,6 +45,24 @@ type RelayBridge struct {
 	listener   net.Listener
 	closed     atomic.Bool
 	onPong     func()
+
+	// Stateful framing buffer.
+	//
+	// The wire protocol is [length:4][connID:4][type:1][payload]. A single
+	// inbound delivery from the tunnel may contain:
+	//   * one complete frame (the easy case, e.g. KCP message mode),
+	//   * several complete frames concatenated (KCP stream mode, or coalesced
+	//     SCTP delivery),
+	//   * a complete frame plus a partial tail of the next frame,
+	//   * just a partial frame (continuation of one that started in the
+	//     previous delivery).
+	//
+	// Without this accumulator the legacy parser (DecodeFrames) silently
+	// dropped everything past the first incomplete frame — which is why
+	// 92 MB of KCP-delivered bytes never reached the SOCKS app. With the
+	// accumulator we are tolerant of any chunking the transport applies.
+	recvMu    sync.Mutex
+	recvAccum []byte
 }
 
 // SetOnPong is called when a control MsgPong arrives (joiner watchdog).
@@ -81,43 +100,124 @@ func (rb *RelayBridge) send(connID uint32, msgType byte, payload []byte) {
 	rb.tunnel.SendData(EncodeFrame(connID, msgType, payload))
 }
 
+// handleTunnelData is the OnData callback wired into the underlying
+// DataTunnel (DCTunnel / VP8DataTunnel / KCPTunnel). It MUST be
+// resilient to arbitrary chunking — different transports deliver bytes
+// in different boundaries:
+//
+//   * DCTunnel/SCTP — usually one app-write == one delivery, but the
+//     SCTP layer is allowed to coalesce or split.
+//   * VP8DataTunnel — one VP8 sample == one delivery (after obfuscator).
+//   * KCPTunnel — one session.Read() may return either exactly one frame
+//     (message mode) or arbitrary chunks (stream mode), and a misconfigured
+//     peer can produce mixed deliveries.
+//
+// We accumulate received bytes in rb.recvAccum, parse out as many complete
+// frames as we can, and keep the trailing partial frame for next time.
+// This guarantees no byte is ever silently discarded.
 func (rb *RelayBridge) handleTunnelData(data []byte) {
-	DecodeFrames(data, func(connID uint32, msgType byte, payload []byte) {
-		// Any inbound tunnel frame means the path is alive (VP8 bulk load may delay MsgPong).
-		if rb.mode == "joiner" && rb.onPong != nil {
-			rb.onPong()
+	if len(data) == 0 {
+		return
+	}
+	rb.recvMu.Lock()
+	rb.recvAccum = append(rb.recvAccum, data...)
+	// Safety cap — if for any reason the accumulator grows unbounded
+	// (peer is producing malformed frame lengths), drop everything so we
+	// don't OOM. 1 MB is far above any legitimate frame size (we cap our
+	// own sends at readBuf ≤ 65 KB + 5-byte header).
+	const recvAccumMax = 1 << 20 // 1 MiB
+	if len(rb.recvAccum) > recvAccumMax {
+		rb.logFn("relay: recvAccum exceeded %d bytes — discarding (likely protocol corruption)", recvAccumMax)
+		rb.recvAccum = rb.recvAccum[:0]
+		rb.recvMu.Unlock()
+		return
+	}
+	// Parse as many complete frames as fit. consumed is the offset of the
+	// first byte we couldn't fully decode (start of the partial tail).
+	consumed := 0
+	for {
+		remaining := rb.recvAccum[consumed:]
+		if len(remaining) < 4 {
+			break // need at least the length prefix
 		}
-		if connID == ControlConnID {
-			switch msgType {
-			case MsgConfig:
-				fps, batch, ok := DecodeVP8Config(payload)
-				if !ok {
-					return
-				}
-				if rb.mode == "creator" {
-					rb.logFn("relay: peer vp8 config fps=%d batch=%d", fps, batch)
-					rb.tunnel.Reconfigure(fps, batch)
-				}
-				return
-			case MsgPing:
-				if rb.mode == "creator" {
-					rb.send(ControlConnID, MsgPong, nil)
-				}
-				return
-			case MsgPong:
-				if rb.mode == "joiner" && rb.onPong != nil {
-					rb.onPong()
-				}
+		frameLen := int(binary.BigEndian.Uint32(remaining[0:4]))
+		if frameLen < 5 {
+			// Corrupt length — recover by skipping one byte and trying
+			// again. This shouldn't happen in a healthy session; if it
+			// does, log once per call to avoid spam.
+			rb.logFn("relay: bad frame length %d at offset %d — resync by skipping 1 byte", frameLen, consumed)
+			consumed++
+			continue
+		}
+		total := 4 + frameLen
+		if total > len(remaining) {
+			break // incomplete frame — wait for more data
+		}
+		connID := binary.BigEndian.Uint32(remaining[4:8])
+		msgType := remaining[8]
+		payload := remaining[9 : 4+frameLen]
+		// Copy payload — the slice points into recvAccum, which we'll
+		// truncate at the end of this call. Downstream handlers may
+		// stash the bytes (sc.toApp, inCh) and must not see them clobbered.
+		payloadCopy := make([]byte, len(payload))
+		copy(payloadCopy, payload)
+		consumed = consumed + total
+		// Dispatch this frame without holding recvMu — the handler may
+		// re-enter SendData → KCP.Write → eventually back here via a
+		// different goroutine, and we don't want to self-deadlock.
+		rb.recvMu.Unlock()
+		rb.dispatchFrame(connID, msgType, payloadCopy)
+		rb.recvMu.Lock()
+	}
+	// Compact: discard consumed prefix, keep the partial tail (if any).
+	if consumed > 0 {
+		if consumed >= len(rb.recvAccum) {
+			rb.recvAccum = rb.recvAccum[:0]
+		} else {
+			n := copy(rb.recvAccum, rb.recvAccum[consumed:])
+			rb.recvAccum = rb.recvAccum[:n]
+		}
+	}
+	rb.recvMu.Unlock()
+}
+
+// dispatchFrame is the original per-frame switch, split out from
+// handleTunnelData so the accumulator loop stays compact.
+func (rb *RelayBridge) dispatchFrame(connID uint32, msgType byte, payload []byte) {
+	// Any inbound tunnel frame means the path is alive (VP8 bulk load may delay MsgPong).
+	if rb.mode == "joiner" && rb.onPong != nil {
+		rb.onPong()
+	}
+	if connID == ControlConnID {
+		switch msgType {
+		case MsgConfig:
+			fps, batch, ok := DecodeVP8Config(payload)
+			if !ok {
 				return
 			}
+			if rb.mode == "creator" {
+				rb.logFn("relay: peer vp8 config fps=%d batch=%d", fps, batch)
+				rb.tunnel.Reconfigure(fps, batch)
+			}
+			return
+		case MsgPing:
+			if rb.mode == "creator" {
+				rb.send(ControlConnID, MsgPong, nil)
+			}
+			return
+		case MsgPong:
+			if rb.mode == "joiner" && rb.onPong != nil {
+				rb.onPong()
+			}
+			return
 		}
-		switch rb.mode {
-		case "joiner":
-			rb.handleJoinerMessage(connID, msgType, payload)
-		case "creator":
-			rb.handleCreatorMessage(connID, msgType, payload)
-		}
-	})
+	}
+	switch rb.mode {
+	case "joiner":
+		rb.handleJoinerMessage(connID, msgType, payload)
+	case "creator":
+		rb.handleCreatorMessage(connID, msgType, payload)
+	}
 }
 
 func (rb *RelayBridge) handleJoinerMessage(connID uint32, msgType byte, payload []byte) {
