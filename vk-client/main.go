@@ -331,6 +331,92 @@ func extraBypassIPsFromEnv() []string {
 	return out
 }
 
+// resolveTunnelMode determines the tunnel bulk transport mode and writes it
+// back into VK_VPN_TUNNEL_MODE so the rest of the codebase (joiner.go) can
+// keep reading it via os.Getenv. Sources, in descending priority:
+//
+//  1. CLI flag       — `--tunnel-mode=dc` or `--tunnel-mode=video`
+//                       Also accepted in legacy forms: `--tunnel-mode dc`,
+//                       `-tunnel-mode=dc`.
+//  2. $env:VK_VPN_TUNNEL_MODE — only honoured if explicitly set by the
+//                       process that launched us. Reliable when the user
+//                       runs `& vk-client.exe` from the same PowerShell
+//                       session where they did `$env:VK_VPN_TUNNEL_MODE=...`.
+//                       Unreliable when launched from Explorer/WebView2 —
+//                       which is why we have the other sources.
+//  3. Config file    — `<exeDir>/tunnel-mode.txt`, one line, "dc" or "video".
+//                       Survives reboots, no PowerShell required.
+//  4. Default        — "video" (preserves legacy behaviour).
+//
+// Always logs the final decision and the source, so app.log shows exactly
+// which mode the joiner will negotiate.
+func resolveTunnelMode(exe string) {
+	const envKey = "VK_VPN_TUNNEL_MODE"
+
+	clean := func(s string) string {
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+	accept := func(s string) (string, bool) {
+		c := clean(s)
+		switch c {
+		case "dc", "video", "kcp":
+			return c, true
+		}
+		return "", false
+	}
+
+	// 1. CLI flag — parse manually because Wails consumes flag.Parse() later.
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		var raw string
+		switch {
+		case strings.HasPrefix(arg, "--tunnel-mode="):
+			raw = arg[len("--tunnel-mode="):]
+		case strings.HasPrefix(arg, "-tunnel-mode="):
+			raw = arg[len("-tunnel-mode="):]
+		case arg == "--tunnel-mode" || arg == "-tunnel-mode":
+			if i+1 < len(os.Args) {
+				raw = os.Args[i+1]
+			}
+		default:
+			continue
+		}
+		if mode, ok := accept(raw); ok {
+			os.Setenv(envKey, mode)
+			log.Printf("Tunnel mode = %s (source: CLI flag --tunnel-mode)", mode)
+			return
+		}
+		log.Printf("Tunnel mode: ignoring invalid CLI flag value %q (expected 'dc', 'video', or 'kcp')", raw)
+	}
+
+	// 2. Process env.
+	if v, present := os.LookupEnv(envKey); present {
+		if mode, ok := accept(v); ok {
+			os.Setenv(envKey, mode) // normalise case
+			log.Printf("Tunnel mode = %s (source: env %s)", mode, envKey)
+			return
+		}
+		log.Printf("Tunnel mode: ignoring invalid env %s=%q (expected 'dc', 'video', or 'kcp')", envKey, v)
+	}
+
+	// 3. Config file next to the executable.
+	if exe != "" {
+		cfgPath := filepath.Join(filepath.Dir(exe), "tunnel-mode.txt")
+		if data, err := os.ReadFile(cfgPath); err == nil {
+			if mode, ok := accept(string(data)); ok {
+				os.Setenv(envKey, mode)
+				log.Printf("Tunnel mode = %s (source: file %s)", mode, cfgPath)
+				return
+			}
+			log.Printf("Tunnel mode: ignoring invalid content in %s (expected 'dc', 'video', or 'kcp')", cfgPath)
+		}
+	}
+
+	// 4. Default.
+	os.Setenv(envKey, "video")
+	log.Println("Tunnel mode = video (source: default — use --tunnel-mode=dc, env, or tunnel-mode.txt to override)")
+}
+
 func main() {
 	exe, err := os.Executable()
 	if err == nil {
@@ -340,6 +426,16 @@ func main() {
 			defer logFile.Close()
 		}
 	}
+
+	// Resolve tunnel mode (video|dc) deterministically, in priority order:
+	//   1. CLI flag       --tunnel-mode=dc           (highest — survives Wails)
+	//   2. Env var        VK_VPN_TUNNEL_MODE=dc      (PowerShell $env: — fragile on Windows
+	//                                                  because Explorer/WebView2 may strip it)
+	//   3. Config file    <exeDir>/tunnel-mode.txt   (one line: "dc" or "video")
+	//   4. Default        "video"
+	// Whatever wins is exported back into the process env, so the deeper
+	// `joiner.go` code can keep using os.Getenv without changes.
+	resolveTunnelMode(exe)
 
 	app := NewApp()
 

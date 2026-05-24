@@ -17,6 +17,16 @@ Environment=VK_VPN_LOG_LEVEL=info
 # Дублируем лог в файл; файл усекается при каждом старте процесса,
 # т.е. `make restart` / `make deploy` сами очищают лог.
 Environment=VK_VPN_LOG_FILE=/var/log/vk-vpn-daemon.log
+# Bulk transport mode (Hybrid-B по плану TRANSPORT_FIX_PLAN.md):
+#   kcp   — KCP-over-VP8 (default — Hybrid-B, надёжный ARQ + FEC)
+#   video — легаси VP8 без ARQ (для A/B-сравнений)
+#   dc    — bulk через SCTP DataChannel (диагностика; throughput низкий на TURN)
+# Должен совпадать с режимом на клиенте.
+Environment=VK_VPN_TUNNEL_MODE=kcp
+# KCP-тюнинги. Все опциональны.
+#Environment=VK_VPN_KCP_FEC=10:3       # FEC data:parity (off = выключить)
+#Environment=VK_VPN_KCP_WINDOW=2048    # KCP send/recv window (packets)
+#Environment=VK_VPN_KCP_MTU=1200       # KCP MTU (с учётом fake-VP8+obf+DTLS overhead)
 
 [Install]
 WantedBy=multi-user.target

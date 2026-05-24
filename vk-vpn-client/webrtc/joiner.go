@@ -46,6 +46,7 @@ type Joiner struct {
 	dc            *webrtc.DataChannel
 	dcTunnel      *tunnel.DCTunnel
 	vp8Tunnel     *tunnel.VP8DataTunnel
+	kcpTunnel     *tunnel.KCPTunnel
 	sampleTrack   *webrtc.TrackLocalStaticSample
 	tunnelMode    string
 	relay         *tunnel.RelayBridge
@@ -78,8 +79,11 @@ type Joiner struct {
 
 func NewJoiner(ctx context.Context, auth *AuthParams, socksPort int) *Joiner {
 	childCtx, cancel := context.WithCancel(ctx)
-	mode := os.Getenv("VK_VPN_TUNNEL_MODE")
-	if mode != "dc" && mode != "video" {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("VK_VPN_TUNNEL_MODE")))
+	switch mode {
+	case "dc", "video", "kcp":
+		// recognised
+	default:
 		mode = "video"
 	}
 	j := &Joiner{
@@ -447,18 +451,17 @@ func (j *Joiner) initPC() {
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		log.Printf("Client connection state: %s (tunnel=%s)", s.String(), j.tunnelMode)
-		if j.tunnelMode == "video" && s == webrtc.PeerConnectionStateConnected {
+		if (j.tunnelMode == "video" || j.tunnelMode == "kcp") && s == webrtc.PeerConnectionStateConnected {
 			go j.startVideoTunnel()
 		}
 	})
-	if j.tunnelMode == "video" {
+	// VP8 RTP arrives for both "video" and "kcp" modes — the only difference
+	// is what we feed the decoded frame into. j.handleVP8Frame routes between
+	// VP8DataTunnel (legacy) and KCPTunnel (Hybrid-B).
+	if j.tunnelMode == "video" || j.tunnelMode == "kcp" {
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			log.Printf("Joiner: remote track %s", track.Codec().MimeType)
-			go tunnel.ReadVP8TrackLogged(track, func(frame []byte) {
-				if j.vp8Tunnel != nil {
-					j.vp8Tunnel.HandleFrame(frame)
-				}
-			})
+			go tunnel.ReadVP8TrackLogged(track, j.handleVP8Frame)
 		})
 	}
 
@@ -563,15 +566,33 @@ func (j *Joiner) attachRelay(t tunnel.DataTunnel) {
 
 func (j *Joiner) startVideoTunnel() {
 	j.mu.Lock()
-	if j.vp8Tunnel != nil {
+	if j.vp8Tunnel != nil || j.kcpTunnel != nil {
 		j.mu.Unlock()
 		return
 	}
 	j.mu.Unlock()
 	if j.sampleTrack == nil {
-		log.Println("Joiner: video mode but no sample track")
+		log.Println("Joiner: video/kcp mode but no sample track")
 		return
 	}
+
+	// Hybrid-B path: KCP-over-VP8. Reliable ARQ + optional FEC on top of
+	// the same VP8 RTP carrier the legacy "video" mode uses. To the outer
+	// observer (TURN / SFU / DPI) the on-wire profile is identical.
+	if j.tunnelMode == "kcp" {
+		log.Println("Joiner: === KCP-OVER-VP8 TUNNEL CONNECTED ===")
+		kcpTun, err := tunnel.NewKCPTunnel(j.sampleTrack, j.obf, logx.TagPrintf("kcp"))
+		if err != nil {
+			log.Printf("Joiner: KCP init failed: %v — falling back to legacy VP8 mode", err)
+			j.tunnelMode = "video"
+		} else {
+			j.kcpTunnel = kcpTun
+			kcpTun.Start(0, 0)
+			j.attachRelay(kcpTun)
+			return
+		}
+	}
+
 	log.Println("Joiner: === VP8 TUNNEL CONNECTED ===")
 	fps, batch := VP8PacingFromEnv()
 	j.vp8Tunnel = tunnel.NewVP8DataTunnel(j.sampleTrack, j.obf, logx.TagPrintf("vp8"))
@@ -579,6 +600,20 @@ func (j *Joiner) startVideoTunnel() {
 	j.vp8Tunnel.SendData(tunnel.EncodeVP8Config(j.vp8Tunnel.FPS(), j.vp8Tunnel.Batch()))
 	logx.L("joiner", "VP8 pacing fps=%d batch=%d (~%d kbps target)", fps, batch, fps*batch*1126*8/1000)
 	j.attachRelay(j.vp8Tunnel)
+}
+
+// handleVP8Frame routes a decoded VP8 sample to whichever transport is
+// currently active. Called from the OnTrack reader-loop in both KCP and
+// legacy-video modes. The tunnels themselves know how to deal with the
+// obfuscator header — they receive the raw obfuscated bytes and decode.
+func (j *Joiner) handleVP8Frame(frame []byte) {
+	if j.kcpTunnel != nil {
+		j.kcpTunnel.HandleFrame(frame)
+		return
+	}
+	if j.vp8Tunnel != nil {
+		j.vp8Tunnel.HandleFrame(frame)
+	}
 }
 
 // SOCKS/DC/VP8 relay is handled by tunnel.RelayBridge (whitelist-bypass).
@@ -802,6 +837,9 @@ func (j *Joiner) Close() {
 
 		if j.vp8Tunnel != nil {
 			j.vp8Tunnel.Stop()
+		}
+		if j.kcpTunnel != nil {
+			j.kcpTunnel.Stop()
 		}
 		if j.tunnelWD != nil {
 			j.tunnelWD.Stop()

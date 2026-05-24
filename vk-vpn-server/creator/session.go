@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,7 @@ type TunnelSession struct {
 	rawDC       datachannel.ReadWriteCloser // non-nil when Detach() succeeded
 	sampleTrack *webrtc.TrackLocalStaticSample
 	vp8Tunnel   *tunnel.VP8DataTunnel
+	kcpTunnel   *tunnel.KCPTunnel
 	videoRelay  *tunnel.RelayBridge
 	remoteSet   bool
 	pending     []webrtc.ICECandidateInit
@@ -170,6 +172,23 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 			}
 		}
 		s.videoOnce.Do(func() {
+			// Mode selection mirrors the joiner. Default = legacy VP8.
+			// KCP-over-VP8 (Hybrid-B) when env says so. Both transports
+			// publish into the same sampleTrack; the only difference is
+			// whether bytes are framed by VP8DataTunnel or KCPTunnel.
+			mode := strings.ToLower(strings.TrimSpace(os.Getenv("VK_VPN_TUNNEL_MODE")))
+			if mode == "kcp" {
+				log.Println("[creator] === MODE: KCP-OVER-VP8 ===")
+				kcpTun, err := tunnel.NewKCPTunnel(s.sampleTrack, s.obf, log.Printf)
+				if err != nil {
+					log.Printf("[creator] KCP init failed: %v — falling back to legacy VP8", err)
+				} else {
+					kcpTun.Start(0, 0)
+					s.kcpTunnel = kcpTun
+					s.videoRelay = tunnel.NewRelayBridge(kcpTun, "creator", s.readBuf, log.Printf)
+					return
+				}
+			}
 			log.Println("[creator] === MODE: VIDEO (VP8) ===")
 			tun := tunnel.NewVP8DataTunnel(s.sampleTrack, s.obf, log.Printf)
 			tun.Start(tunnel.DefaultVP8FPS, tunnel.DefaultVP8Batch)
@@ -177,6 +196,10 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 			s.videoRelay = tunnel.NewRelayBridge(tun, "creator", s.readBuf, log.Printf)
 		})
 		go tunnel.ReadVP8TrackLogged(track, func(frame []byte) {
+			if s.kcpTunnel != nil {
+				s.kcpTunnel.HandleFrame(frame)
+				return
+			}
 			if s.vp8Tunnel != nil {
 				s.vp8Tunnel.HandleFrame(frame)
 			}
@@ -299,6 +322,9 @@ func (s *TunnelSession) Close() {
 		logx.ResetDCStats()
 		if s.vp8Tunnel != nil {
 			s.vp8Tunnel.Stop()
+		}
+		if s.kcpTunnel != nil {
+			s.kcpTunnel.Stop()
 		}
 		if s.videoRelay != nil {
 			s.videoRelay.Close()
@@ -471,6 +497,12 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	s.conns.Store(connID, dc)
 	s.sendDCFrame(connID, MsgConnectOK, nil)
 
+	// Live rate logger — every 10s prints a delta line per active connection
+	// so we can see SCTP throughput, not just the final close summary.
+	// Logs only when something moved or backlog is non-trivial, to avoid
+	// noise on idle conns.
+	go s.connRateLogger(connID, addr, dc)
+
 	go func() {
 		// Drain inCh until shutdown signalled via doneCh. On doneCh, we
 		// best-effort flush whatever's still queued (origin may already
@@ -532,6 +564,41 @@ func (s *TunnelSession) connectTCP(connID uint32, addr string) {
 	sctpPending := s.waitSCTPDrain()
 	logx.L("dc", "close id=%d %s tx=%d rx=%d sctp_pending=%d", connID, addr, dc.tx.Load(), dc.rx.Load(), sctpPending)
 	s.closeDCConn(connID) // idempotent — joiner's MsgClose may have already done this
+}
+
+// connRateLogger prints one line per active conn every 10s with the
+// delta of bytes / Mbps / sctp_pending. Stops on dc.doneCh.
+// Goal: make it possible to watch throughput live, not only at close.
+func (s *TunnelSession) connRateLogger(connID uint32, addr string, dc *dcConn) {
+	const interval = 10 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var prevTx, prevRx int64
+	for {
+		select {
+		case <-dc.doneCh:
+			return
+		case <-ticker.C:
+			tx := dc.tx.Load()
+			rx := dc.rx.Load()
+			dTx := tx - prevTx
+			dRx := rx - prevRx
+			prevTx, prevRx = tx, rx
+			var pending uint64
+			if s.dc != nil {
+				pending = s.dc.BufferedAmount()
+			}
+			// Skip idle conns to avoid log noise — only print when bytes
+			// moved or the backlog is meaningful.
+			if dTx == 0 && dRx == 0 && pending < 64*1024 {
+				continue
+			}
+			kbpsRx := float64(dRx) * 8 / float64(interval/time.Second) / 1000
+			kbpsTx := float64(dTx) * 8 / float64(interval/time.Second) / 1000
+			logx.L("dc-rate", "id=%d %s rx=%d (+%d, %.1f kbps) tx=%d (+%d, %.1f kbps) sctp_pending=%d",
+				connID, addr, rx, dRx, kbpsRx, tx, dTx, kbpsTx, pending)
+		}
+	}
 }
 
 func (s *TunnelSession) waitSCTPDrain() uint64 {
