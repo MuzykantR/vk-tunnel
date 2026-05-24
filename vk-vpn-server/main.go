@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -26,7 +27,23 @@ func main() {
 	customMaxDCBuf := flag.Int("max-dc-buf", 0, "DC BufferedAmount threshold with --resources custom")
 	customMemLimit := flag.Int64("mem-limit", 0, "Go soft memory limit with --resources custom")
 	callTTL := flag.Duration("call-ttl", 2*time.Hour, "Rotate VK call after this duration (roadmap antifraud)")
+	logFile := flag.String("log-file", os.Getenv("VK_VPN_LOG_FILE"),
+		"Write log to this file (truncated on every start). Empty = stderr/journald only. "+
+			"Default: $VK_VPN_LOG_FILE.")
 	flag.Parse()
+
+	// File logging is opt-in. When enabled, the file is truncated on every
+	// process start — so `make restart` / `make deploy` (which restart the
+	// systemd unit) automatically yields a clean log. We also keep stderr
+	// so journald continues to see the same lines for `journalctl -u`.
+	if *logFile != "" {
+		f, err := os.OpenFile(*logFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			log.Fatalf("cannot open log file %q: %v", *logFile, err)
+		}
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
+		log.Printf("[boot] log file: %s (truncated on start)", *logFile)
+	}
 
 	resProfile := creator.ParseResources(*resources, *customReadBuf, *customMaxDCBuf, *customMemLimit)
 

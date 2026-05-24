@@ -54,6 +54,11 @@ deploy-bot: setup-bot restart-bot
 	@echo "Bot deploy successful."
 
 logs-daemon:
+	@# Файл усекается при каждом старте процесса (restart/deploy) — `-F`
+	@# переоткрывает его при truncate, так что хвост не «застревает».
+	sudo tail -F /var/log/vk-vpn-daemon.log
+
+logs-daemon-journal:
 	sudo journalctl -u vk-vpn-daemon -f
 
 logs-bot:
