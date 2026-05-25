@@ -1,0 +1,731 @@
+Tunnel mode = kcp (source: CLI flag --tunnel-mode)
+[WebView2] Environment created successfully
+App Started
+Connecting to VPN via URI: myvpn://v1:RADipuWxYmfpmKaq:kuFVq-i3vTTPpEVgPZwgw7Q7_4d_uSfIrycOTXUMqhKKIeSKiuv_2nMHofJVZ0fieWsc0AyzNy9ULJ8FuA_XV8vCMNIDG5XYdks42_BTnCM1pWb-QtS1oPjCfOSHRzNzHU3fsbg40BOSJ-XiDsmQDo6ci__E5LyCt5BEjE0GqViqZR4Ij7W-asiShN-4EN0pfolRqSjrItnrGw
+Force-removing adapter: WLVPN
+Adapter WLVPN removal: PowerShell+netsh both failed (output: )
+Performing deep network cleanup (the 'reboot effect')...
+Force-removing adapter: WLVPN
+Adapter WLVPN removal: PowerShell+netsh both failed (output: )
+Network cleanup completed successfully.
+DefaultGateway: 192.168.1.1 via ����஢����� ���� 2 (metric=0)
+Physical default gateway: 192.168.1.1
+Resolving VK session over clean network...
+Successfully decrypted URI. Link: https://vk.com/call/join/ALTMZdXcaFwGpoXVEhS8aFjVTjWs0B0DnxM_zuDBChc
+Captcha required by VK. Launching browser for interactive verification...
+Opening captcha in browser: http://127.0.0.1:56360/
+Captcha solved successfully! Retrying API call...
+Session resolved; 7 known bypass IPs from TURN/STUN/API
+Starting tun2socks engine...
+Starting tun2socks: device=tun://WLVPN proxy=socks5://127.0.0.1:1080 mtu=1400
+Using existing driver 0.14
+Creating adapter
+tun2socks engine running
+Found tun2socks adapter: 'WLVPN'
+Using TUN adapter: WLVPN
+Assigning IP 10.8.0.2/255.255.255.0 to interface 'WLVPN'...
+TUN MTU=1400 (env VK_VPN_MTU, default 1400)
+Setting MTU of WLVPN to 1400...
+Extra bypass IPs (VK_VPN_EXTRA_BYPASS_IPS): [185.103.101.245]
+Installing bypass /32 routes for all known TURN/STUN/API hosts...
+Adding direct route for vk.com (87.240.129.133) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.67) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.78) via 192.168.1.1
+Adding direct route for vk.com (87.240.137.164) via 192.168.1.1
+Adding direct route for vk.com (93.186.225.194) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.72) via 192.168.1.1
+Adding direct route for vk.ru (93.186.225.194) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.78) via 192.168.1.1
+Adding direct route for vk.ru (87.240.129.133) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.72) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.67) via 192.168.1.1
+Adding direct route for vk.ru (87.240.137.164) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.152.226) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.155.82) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.156.72) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.152.226) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.156.72) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.155.82) via 192.168.1.1
+Adding direct route for stun.l.google.com (74.125.250.129) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.72) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.78) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.137.164) via 192.168.1.1
+Adding direct route for stun.vk.com (93.186.225.194) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.129.133) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.67) via 192.168.1.1
+Adding direct route for videowebrtc.okcdn.ru (155.212.204.11) via 192.168.1.1
+Adding direct route for videowebrtc.okcdn.ru (155.212.204.196) via 192.168.1.1
+Adding TURN/STUN bypass route for 95.163.34.152 via 192.168.1.1
+Adding TURN/STUN bypass route for 90.156.236.72 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.136 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.195 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.12 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.11 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.196 via 192.168.1.1
+Adding TURN/STUN bypass route for 185.103.101.245 via 192.168.1.1
+Adding direct route for VK subnet 87.240.128.0/18 via 192.168.1.1
+Adding direct route for VK subnet 93.186.224.0/20 via 192.168.1.1
+Adding direct route for VK subnet 95.142.192.0/18 via 192.168.1.1
+Adding direct route for VK subnet 185.32.248.0/22 via 192.168.1.1
+Adding direct route for VK subnet 185.180.200.0/22 via 192.168.1.1
+Adding direct route for VK subnet 217.20.144.0/20 via 192.168.1.1
+Adding direct route for VK subnet 217.20.154.0/23 via 192.168.1.1
+Adding direct route for VK subnet 95.213.0.0/17 via 192.168.1.1
+Adding direct route for VK subnet 79.137.128.0/18 via 192.168.1.1
+Adding DNS bypass route for gateway 192.168.1.1
+Starting VPN Core Client (ICE/DTLS/DC) on prepared routing table...
+Joiner: obfuscator on (epoch=0x2d6fb1ca)
+Joiner: using pre-resolved session params, turn=[turn:95.163.34.152:19302 turn:90.156.236.72:19302]
+Connected to VK WebSocket successfully
+Updated TURN servers: [turn:95.163.34.152:19302 turn:90.156.236.72:19302]
+22:14:45.156 [ice] ICETransportPolicy=relay (TURN only — testing default; release: VK_VPN_ICE_TRANSPORT_POLICY=all)
+22:14:45.156 [ice] RelayAcceptanceMinWait skipped (ICETransportPolicy=relay)
+Joiner: PC ready (tunnel=kcp), waiting for offer
+Registered peer ID: 1125899981254525
+Remote SDP: offer (signalingState=stable, answerSent=false)
+Client ICE state: checking
+Client connection state: connecting (tunnel=kcp)
+Sent SDP answer to creator
+[bypass] remote ICE candidate IP: 95.163.34.152
+Dynamic bypass for new ICE IP: 95.163.34.152
+Dynamic bypass (candidate): candidate:3805988033 1 udp 16777215 95.163.34.152 40101 typ relay raddr 0.0.0.0 rport 40247
+[bypass] remote ICE candidate IP: 90.156.236.72
+Dynamic bypass for new ICE IP: 90.156.236.72
+Dynamic bypass (candidate): candidate:1162437452 1 udp 16777215 90.156.236.72 33576 typ relay raddr 0.0.0.0 rport 52339
+Client ICE state: connected
+22:14:47.670 [joiner] first ICE connected
+22:14:47.670 [joiner] ICE candidates in stats: relay/udp:36676@90.156.236.72 relay/udp:40101@95.163.34.152
+22:14:47.670 [joiner] ICE selected nominated relay/udp:36676 <-> relay/udp:40101 (90.156.236.72 -> 95.163.34.152)
+22:14:47.670 [joiner] ICE uses TURN relay (local side) 90.156.236.72 -> 95.163.34.152; slower than host/srflx — increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass
+Client connection state: connected (tunnel=kcp)
+Joiner: === KCP-OVER-VP8 TUNNEL CONNECTED ===
+22:14:47.856 [kcp] kcp: tunnel ready conv=0x564b5650 mtu=1200 window=1024/1024 fec=10/3 nodelay=1,10,2,1 stream_mode=false
+SOCKS5 via RelayBridge (kcp) on 127.0.0.1:1080
+VPN tunnel ready (DC or VP8)
+22:14:47.857 [relay] relay: SOCKS5 on 127.0.0.1:1080 (mode=joiner)
+ICE on TURN relay — waiting up to 3s for direct host/srflx (elapsed 0s, bypass [90.156.236.72 95.163.34.152])
+VPN tunnel DataChannel open (mode=kcp)
+Joiner: remote track video/VP8
+[video] recv vp8 frame #1 24 bytes
+[video] recv vp8 frame #2 24 bytes
+[video] recv vp8 frame #3 24 bytes
+ICE on TURN relay — waiting up to 2s for direct host/srflx (elapsed 1s, bypass [90.156.236.72 95.163.34.152])
+ICE on TURN relay — waiting up to 1s for direct host/srflx (elapsed 2s, bypass [90.156.236.72 95.163.34.152])
+ICE bypass via TURN relay (no direct pair in 3s): [90.156.236.72 95.163.34.152]
+Default redirect attempt 1/2 (WLB + nominated pair bypass)
+[bypass] WS endpoint host: videowebrtc.okcdn.ru
+Bypass routes flushed (pre-redirect)
+Redirecting all traffic to TUN adapter...
+Added route 0.0.0.0/1 via WLVPN nexthop=10.8.0.1 metric=2
+Added route 128.0.0.0/1 via WLVPN nexthop=10.8.0.1 metric=2
+[bypass] WS endpoint host: videowebrtc.okcdn.ru
+22:14:52.205 [kcp] kcp: read#1 n=9 head=00 00 00 05 00 00 00 01 02
+22:14:52.265 [kcp] kcp: read#2 n=9 head=00 00 00 05 00 00 00 01 05
+Bypass routes flushed (post-redirect)
+22:14:52.477 [kcp] kcp: read#3 n=9 head=00 00 00 05 00 00 00 02 02
+22:14:52.656 [kcp] kcp: read#4 n=196 head=00 00 00 c0 00 00 00 02 04 48 54 54 50 2f 31 2e
+22:14:52.656 [kcp] kcp: read#5 n=9 head=00 00 00 05 00 00 00 02 05
+22:14:52.656 [relay] relay: joiner close id=2 after inbound grace
+ICE held connected/completed for 5s (informational; redirect may already be active)
+ICE stable 5s after redirect attempt 1
+VPN Connected Successfully!
+22:14:57.857 [kcp] kcp-rate: in=268 (+268, 0.2 kbps) out=298 (+298, 0.2 kbps) srtt=59ms rto=79ms recv_drop=0
+22:15:07.857 [kcp] kcp-rate: in=295 (+27, 0.0 kbps) out=350 (+52, 0.0 kbps) srtt=59ms rto=75ms recv_drop=0
+[video] recv vp8 frame #200 1261 bytes
+[video] recv vp8 frame #400 317 bytes
+[video] recv vp8 frame #600 93 bytes
+[video] recv vp8 frame #800 93 bytes
+[video] recv vp8 frame #1000 93 bytes
+[video] recv vp8 frame #1200 93 bytes
+[video] recv vp8 frame #1400 1261 bytes
+[video] recv vp8 frame #1600 1261 bytes
+[video] recv vp8 frame #1800 1261 bytes
+[video] recv vp8 frame #2000 1261 bytes
+[video] recv vp8 frame #2200 1261 bytes
+22:15:17.670 [joiner] ICE selected nominated relay/udp:36676 <-> relay/udp:40101 (90.156.236.72 -> 95.163.34.152)
+22:15:17.670 [joiner] ICE uses TURN relay (local side) 90.156.236.72 -> 95.163.34.152; slower than host/srflx — increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass
+[video] recv vp8 frame #2400 93 bytes
+22:15:17.857 [kcp] kcp-rate: in=933981 (+933686, 746.9 kbps) out=196779 (+196429, 157.1 kbps) srtt=64ms rto=74ms recv_drop=0
+[vp8-reasm] interval frames=2531 gap_resets=64 depacket_errs=0 (cumulative frames=2532 gaps=64 depacket=0)
+[video] recv vp8 frame #2600 1261 bytes
+[video] recv vp8 frame #2800 1261 bytes
+22:15:24.428 [relay] relay: joiner close id=342 after inbound grace
+[video] recv vp8 frame #3000 1261 bytes
+22:15:27.857 [kcp] kcp-rate: in=1135264 (+201283, 161.0 kbps) out=216054 (+19275, 15.4 kbps) srtt=76ms rto=128ms recv_drop=0
+22:15:37.857 [kcp] kcp-rate: in=1144231 (+8967, 7.2 kbps) out=219152 (+3098, 2.5 kbps) srtt=66ms rto=94ms recv_drop=0
+[video] recv vp8 frame #3200 1261 bytes
+[video] recv vp8 frame #3400 1261 bytes
+[video] recv vp8 frame #3600 1261 bytes
+[video] recv vp8 frame #3800 1261 bytes
+[video] recv vp8 frame #4000 1261 bytes
+22:15:47.857 [kcp] kcp-rate: in=1594426 (+450195, 360.2 kbps) out=219334 (+182, 0.1 kbps) srtt=64ms rto=84ms recv_drop=0
+[vp8-reasm] interval frames=1620 gap_resets=105 depacket_errs=0 (cumulative frames=4152 gaps=169 depacket=0)
+[video] recv vp8 frame #4200 1261 bytes
+[video] recv vp8 frame #4400 1022 bytes
+[video] recv vp8 frame #4600 1261 bytes
+[video] recv vp8 frame #4800 1261 bytes
+[video] recv vp8 frame #5000 1261 bytes
+[video] recv vp8 frame #5200 1261 bytes
+22:15:57.857 [kcp] kcp-rate: in=2144523 (+550097, 440.1 kbps) out=219378 (+44, 0.0 kbps) srtt=62ms rto=74ms recv_drop=0
+[video] recv vp8 frame #5400 1261 bytes
+[video] recv vp8 frame #5600 1261 bytes
+[video] recv vp8 frame #5800 1261 bytes
+[video] recv vp8 frame #6000 1261 bytes
+[video] recv vp8 frame #6200 1261 bytes
+22:16:07.857 [kcp] kcp-rate: in=3526091 (+1381568, 1105.3 kbps) out=219404 (+26, 0.0 kbps) srtt=62ms rto=74ms recv_drop=0
+[video] recv vp8 frame #6400 1261 bytes
+[video] recv vp8 frame #6600 1261 bytes
+[video] recv vp8 frame #6800 1261 bytes
+[video] recv vp8 frame #7000 1261 bytes
+[video] recv vp8 frame #7200 1261 bytes
+22:16:17.857 [kcp] kcp-rate: in=4110028 (+583937, 467.1 kbps) out=219474 (+70, 0.1 kbps) srtt=61ms rto=71ms recv_drop=0
+[vp8-reasm] interval frames=3090 gap_resets=191 depacket_errs=0 (cumulative frames=7242 gaps=360 depacket=0)
+[video] recv vp8 frame #7400 1261 bytes
+[video] recv vp8 frame #7600 1261 bytes
+[video] recv vp8 frame #7800 1261 bytes
+[video] recv vp8 frame #8000 1261 bytes
+[video] recv vp8 frame #8200 1261 bytes
+22:16:27.857 [kcp] kcp-rate: in=5380066 (+1270038, 1016.0 kbps) out=219620 (+146, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #8400 1261 bytes
+[video] recv vp8 frame #8600 1261 bytes
+[video] recv vp8 frame #8800 1261 bytes
+[video] recv vp8 frame #9000 1261 bytes
+22:16:37.857 [kcp] kcp-rate: in=6085904 (+705838, 564.7 kbps) out=219724 (+104, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #9200 1261 bytes
+[video] recv vp8 frame #9400 1261 bytes
+[video] recv vp8 frame #9600 1261 bytes
+[video] recv vp8 frame #9800 1261 bytes
+22:16:47.857 [kcp] kcp-rate: in=6853637 (+767733, 614.2 kbps) out=219794 (+70, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[vp8-reasm] interval frames=2740 gap_resets=219 depacket_errs=0 (cumulative frames=9982 gaps=579 depacket=0)
+[video] recv vp8 frame #10000 1261 bytes
+[video] recv vp8 frame #10200 1261 bytes
+[video] recv vp8 frame #10400 1261 bytes
+[video] recv vp8 frame #10600 1261 bytes
+[video] recv vp8 frame #10800 1261 bytes
+22:16:57.857 [kcp] kcp-rate: in=7365167 (+511530, 409.2 kbps) out=219898 (+104, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #11000 1261 bytes
+[video] recv vp8 frame #11200 1261 bytes
+[video] recv vp8 frame #11400 1261 bytes
+[video] recv vp8 frame #11600 1261 bytes
+22:17:07.856 [kcp] kcp-rate: in=8362421 (+997254, 797.8 kbps) out=219985 (+87, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #11800 1261 bytes
+22:17:09.622 [relay] relay: joiner close id=6 after inbound grace
+[video] recv vp8 frame #12000 1261 bytes
+[video] recv vp8 frame #12200 1261 bytes
+[video] recv vp8 frame #12400 1261 bytes
+22:17:17.857 [kcp] kcp-rate: in=9069562 (+707141, 565.7 kbps) out=220030 (+45, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[vp8-reasm] interval frames=2572 gap_resets=203 depacket_errs=0 (cumulative frames=12554 gaps=782 depacket=0)
+[video] recv vp8 frame #12600 1261 bytes
+[video] recv vp8 frame #12800 1261 bytes
+[video] recv vp8 frame #13000 1261 bytes
+[video] recv vp8 frame #13200 1261 bytes
+22:17:27.856 [kcp] kcp-rate: in=9746099 (+676537, 541.2 kbps) out=220072 (+42, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #13400 1261 bytes
+[video] recv vp8 frame #13600 1261 bytes
+[video] recv vp8 frame #13800 1261 bytes
+[video] recv vp8 frame #14000 1261 bytes
+22:17:37.857 [kcp] kcp-rate: in=10237809 (+491710, 393.4 kbps) out=220081 (+9, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #14200 1261 bytes
+[video] recv vp8 frame #14400 1261 bytes
+[video] recv vp8 frame #14600 24 bytes
+[video] recv vp8 frame #14800 1261 bytes
+[video] recv vp8 frame #15000 1261 bytes
+22:17:47.857 [kcp] kcp-rate: in=11193024 (+955215, 764.2 kbps) out=220177 (+96, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #15200 1261 bytes
+[vp8-reasm] interval frames=2757 gap_resets=205 depacket_errs=0 (cumulative frames=15311 gaps=987 depacket=0)
+22:17:49.639 [relay] relay: joiner close id=7 after inbound grace
+[video] recv vp8 frame #15400 1261 bytes
+[video] recv vp8 frame #15600 1261 bytes
+[video] recv vp8 frame #15800 1261 bytes
+[video] recv vp8 frame #16000 1261 bytes
+[video] recv vp8 frame #16200 1261 bytes
+22:17:57.857 [kcp] kcp-rate: in=12405646 (+1212622, 970.1 kbps) out=220195 (+18, 0.0 kbps) srtt=79ms rto=247ms recv_drop=0
+[video] recv vp8 frame #16400 1261 bytes
+[video] recv vp8 frame #16600 1261 bytes
+[video] recv vp8 frame #16800 1261 bytes
+[video] recv vp8 frame #17000 1261 bytes
+[video] recv vp8 frame #17200 1261 bytes
+22:18:07.856 [kcp] kcp-rate: in=13122005 (+716359, 573.1 kbps) out=220195 (+0, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[video] recv vp8 frame #17400 1261 bytes
+[video] recv vp8 frame #17600 1261 bytes
+[video] recv vp8 frame #17800 1261 bytes
+[video] recv vp8 frame #18000 1261 bytes
+[video] recv vp8 frame #18200 1261 bytes
+[video] recv vp8 frame #18400 1261 bytes
+22:18:17.857 [kcp] kcp-rate: in=14453956 (+1331951, 1065.6 kbps) out=220213 (+18, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[vp8-reasm] interval frames=3247 gap_resets=249 depacket_errs=0 (cumulative frames=18558 gaps=1236 depacket=0)
+[video] recv vp8 frame #18600 1261 bytes
+[video] recv vp8 frame #18800 1261 bytes
+[video] recv vp8 frame #19000 1261 bytes
+[video] recv vp8 frame #19200 1261 bytes
+[video] recv vp8 frame #19400 1261 bytes
+22:18:27.857 [kcp] kcp-rate: in=15248681 (+794725, 635.8 kbps) out=220237 (+24, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[video] recv vp8 frame #19600 1261 bytes
+[video] recv vp8 frame #19800 1261 bytes
+[video] recv vp8 frame #20000 1261 bytes
+[video] recv vp8 frame #20200 1261 bytes
+[video] recv vp8 frame #20400 1261 bytes
+22:18:37.856 [kcp] kcp-rate: in=15954501 (+705820, 564.7 kbps) out=220246 (+9, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[video] recv vp8 frame #20600 1261 bytes
+[video] recv vp8 frame #20800 1261 bytes
+[video] recv vp8 frame #21000 1261 bytes
+[video] recv vp8 frame #21200 1261 bytes
+[video] recv vp8 frame #21400 1261 bytes
+22:18:47.856 [kcp] kcp-rate: in=16700179 (+745678, 596.5 kbps) out=220264 (+18, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[vp8-reasm] interval frames=2986 gap_resets=234 depacket_errs=0 (cumulative frames=21544 gaps=1470 depacket=0)
+[video] recv vp8 frame #21600 1261 bytes
+[video] recv vp8 frame #21800 1261 bytes
+[video] recv vp8 frame #22000 1261 bytes
+[video] recv vp8 frame #22200 1261 bytes
+[video] recv vp8 frame #22400 1261 bytes
+22:18:57.857 [kcp] kcp-rate: in=17630684 (+930505, 744.4 kbps) out=220273 (+9, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[video] recv vp8 frame #22600 1261 bytes
+[video] recv vp8 frame #22800 1261 bytes
+[video] recv vp8 frame #23000 1261 bytes
+22:19:07.856 [kcp] kcp-rate: in=18561180 (+930496, 744.4 kbps) out=220273 (+0, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[video] recv vp8 frame #23200 1261 bytes
+[video] recv vp8 frame #23400 1261 bytes
+[video] recv vp8 frame #23600 1261 bytes
+[video] recv vp8 frame #23800 1261 bytes
+22:19:17.857 [kcp] kcp-rate: in=19130070 (+568890, 455.1 kbps) out=220282 (+9, 0.0 kbps) srtt=76ms rto=220ms recv_drop=0
+[vp8-reasm] interval frames=2422 gap_resets=206 depacket_errs=0 (cumulative frames=23966 gaps=1676 depacket=0)
+[video] recv vp8 frame #24000 1261 bytes
+[video] recv vp8 frame #24200 1261 bytes
+[video] recv vp8 frame #24400 1261 bytes
+[video] recv vp8 frame #24600 1261 bytes
+22:19:27.856 [kcp] kcp-rate: in=19854569 (+724499, 579.6 kbps) out=220315 (+33, 0.0 kbps) srtt=74ms rto=194ms recv_drop=0
+[video] recv vp8 frame #24800 1261 bytes
+[video] recv vp8 frame #25000 1261 bytes
+[video] recv vp8 frame #25200 1261 bytes
+[video] recv vp8 frame #25400 1261 bytes
+[video] recv vp8 frame #25600 1261 bytes
+22:19:37.857 [kcp] kcp-rate: in=20691342 (+836773, 669.4 kbps) out=220324 (+9, 0.0 kbps) srtt=74ms rto=194ms recv_drop=0
+[video] recv vp8 frame #25800 1261 bytes
+[video] recv vp8 frame #26000 1261 bytes
+[video] recv vp8 frame #26200 1261 bytes
+[video] recv vp8 frame #26400 1261 bytes
+22:19:47.857 [kcp] kcp-rate: in=21241544 (+550202, 440.2 kbps) out=220419 (+95, 0.1 kbps) srtt=72ms rto=176ms recv_drop=0
+[video] recv vp8 frame #26600 1261 bytes
+[video] recv vp8 frame #26800 1261 bytes
+[vp8-reasm] interval frames=2843 gap_resets=239 depacket_errs=0 (cumulative frames=26809 gaps=1915 depacket=0)
+[video] recv vp8 frame #27000 1261 bytes
+[video] recv vp8 frame #27200 1261 bytes
+[video] recv vp8 frame #27400 1261 bytes
+22:19:57.856 [kcp] kcp-rate: in=22299635 (+1058091, 846.5 kbps) out=220455 (+36, 0.0 kbps) srtt=72ms rto=176ms recv_drop=0
+[video] recv vp8 frame #27600 1261 bytes
+[video] recv vp8 frame #27800 1261 bytes
+[video] recv vp8 frame #28000 1261 bytes
+[video] recv vp8 frame #28200 1261 bytes
+[video] recv vp8 frame #28400 93 bytes
+22:20:07.856 [kcp] kcp-rate: in=23060488 (+760853, 608.7 kbps) out=222245 (+1790, 1.4 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #28600 1261 bytes
+[video] recv vp8 frame #28800 1261 bytes
+[video] recv vp8 frame #29000 1261 bytes
+[video] recv vp8 frame #29200 1261 bytes
+[video] recv vp8 frame #29400 1261 bytes
+[video] recv vp8 frame #29600 1261 bytes
+22:20:17.856 [kcp] kcp-rate: in=24005027 (+944539, 755.6 kbps) out=229295 (+7050, 5.6 kbps) srtt=64ms rto=108ms recv_drop=0
+[video] recv vp8 frame #29800 1261 bytes
+[vp8-reasm] interval frames=2999 gap_resets=247 depacket_errs=0 (cumulative frames=29808 gaps=2162 depacket=0)
+[video] recv vp8 frame #30000 1261 bytes
+[video] recv vp8 frame #30200 1261 bytes
+[video] recv vp8 frame #30400 1261 bytes
+22:20:27.856 [kcp] kcp-rate: in=25172007 (+1166980, 933.6 kbps) out=229328 (+33, 0.0 kbps) srtt=64ms rto=96ms recv_drop=0
+[video] recv vp8 frame #30600 1261 bytes
+[video] recv vp8 frame #30800 1261 bytes
+[video] recv vp8 frame #31000 1261 bytes
+[video] recv vp8 frame #31200 1261 bytes
+22:20:37.856 [kcp] kcp-rate: in=25813780 (+641773, 513.4 kbps) out=230543 (+1215, 1.0 kbps) srtt=64ms rto=96ms recv_drop=0
+[video] recv vp8 frame #31400 1261 bytes
+[video] recv vp8 frame #31600 1261 bytes
+[video] recv vp8 frame #31800 1261 bytes
+[video] recv vp8 frame #32000 1261 bytes
+22:20:47.856 [kcp] kcp-rate: in=26320390 (+506610, 405.3 kbps) out=230612 (+69, 0.1 kbps) srtt=64ms rto=96ms recv_drop=0
+[video] recv vp8 frame #32200 1261 bytes
+[vp8-reasm] interval frames=2585 gap_resets=250 depacket_errs=0 (cumulative frames=32393 gaps=2412 depacket=0)
+[video] recv vp8 frame #32400 1261 bytes
+[video] recv vp8 frame #32600 1261 bytes
+[video] recv vp8 frame #32800 1261 bytes
+[video] recv vp8 frame #33000 1261 bytes
+[video] recv vp8 frame #33200 1261 bytes
+22:20:57.856 [kcp] kcp-rate: in=27156132 (+835742, 668.6 kbps) out=230647 (+35, 0.0 kbps) srtt=63ms rto=83ms recv_drop=0
+[video] recv vp8 frame #33400 1261 bytes
+[video] recv vp8 frame #33600 1261 bytes
+[video] recv vp8 frame #33800 1261 bytes
+[video] recv vp8 frame #34000 1261 bytes
+22:21:07.856 [kcp] kcp-rate: in=28147501 (+991369, 793.1 kbps) out=230672 (+25, 0.0 kbps) srtt=63ms rto=83ms recv_drop=0
+[video] recv vp8 frame #34200 1261 bytes
+[video] recv vp8 frame #34400 1261 bytes
+[video] recv vp8 frame #34600 1261 bytes
+[video] recv vp8 frame #34800 1261 bytes
+[video] recv vp8 frame #35000 1261 bytes
+22:21:17.856 [kcp] kcp-rate: in=29142383 (+994882, 795.9 kbps) out=230893 (+221, 0.2 kbps) srtt=61ms rto=71ms recv_drop=0
+[video] recv vp8 frame #35200 1261 bytes
+[video] recv vp8 frame #35400 1261 bytes
+[vp8-reasm] interval frames=3014 gap_resets=245 depacket_errs=0 (cumulative frames=35407 gaps=2657 depacket=0)
+[video] recv vp8 frame #35600 1261 bytes
+[video] recv vp8 frame #35800 1261 bytes
+[video] recv vp8 frame #36000 1261 bytes
+22:21:27.856 [kcp] kcp-rate: in=29739314 (+596931, 477.5 kbps) out=231151 (+258, 0.2 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #36200 1261 bytes
+[video] recv vp8 frame #36400 1261 bytes
+[video] recv vp8 frame #36600 1261 bytes
+[video] recv vp8 frame #36800 1261 bytes
+[video] recv vp8 frame #37000 1261 bytes
+[video] recv vp8 frame #37200 1261 bytes
+22:21:37.856 [kcp] kcp-rate: in=30694484 (+955170, 764.1 kbps) out=231221 (+70, 0.1 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #37400 1261 bytes
+[video] recv vp8 frame #37600 1261 bytes
+[video] recv vp8 frame #37800 1261 bytes
+[video] recv vp8 frame #38000 1261 bytes
+[video] recv vp8 frame #38200 1261 bytes
+22:21:47.856 [kcp] kcp-rate: in=31886136 (+1191652, 953.3 kbps) out=231354 (+133, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #38400 1261 bytes
+[vp8-reasm] interval frames=3129 gap_resets=242 depacket_errs=0 (cumulative frames=38536 gaps=2899 depacket=0)
+[video] recv vp8 frame #38600 1261 bytes
+[video] recv vp8 frame #38800 1261 bytes
+[video] recv vp8 frame #39000 1261 bytes
+22:21:57.856 [kcp] kcp-rate: in=32435060 (+548924, 439.1 kbps) out=231441 (+87, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #39200 1261 bytes
+[video] recv vp8 frame #39400 1261 bytes
+[video] recv vp8 frame #39600 1261 bytes
+[video] recv vp8 frame #39800 1261 bytes
+[video] recv vp8 frame #40000 1261 bytes
+22:22:07.856 [kcp] kcp-rate: in=33370401 (+935341, 748.3 kbps) out=231492 (+51, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #40200 1261 bytes
+[video] recv vp8 frame #40400 1261 bytes
+[video] recv vp8 frame #40600 1261 bytes
+[video] recv vp8 frame #40800 1261 bytes
+22:22:17.856 [kcp] kcp-rate: in=33920466 (+550065, 440.1 kbps) out=231629 (+137, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #41000 1261 bytes
+[video] recv vp8 frame #41200 1261 bytes
+[vp8-reasm] interval frames=2714 gap_resets=183 depacket_errs=0 (cumulative frames=41250 gaps=3082 depacket=0)
+[video] recv vp8 frame #41400 1261 bytes
+[video] recv vp8 frame #41600 1261 bytes
+[video] recv vp8 frame #41800 1261 bytes
+22:22:27.857 [kcp] kcp-rate: in=35222211 (+1301745, 1041.4 kbps) out=231750 (+121, 0.1 kbps) srtt=61ms rto=73ms recv_drop=0
+[video] recv vp8 frame #42000 1261 bytes
+[video] recv vp8 frame #42200 1261 bytes
+[video] recv vp8 frame #42400 1261 bytes
+22:22:37.856 [kcp] kcp-rate: in=35682194 (+459983, 368.0 kbps) out=231786 (+36, 0.0 kbps) srtt=61ms rto=73ms recv_drop=0
+[video] recv vp8 frame #42600 1261 bytes
+[video] recv vp8 frame #42800 1261 bytes
+[video] recv vp8 frame #43000 1261 bytes
+[video] recv vp8 frame #43200 1261 bytes
+[video] recv vp8 frame #43400 1261 bytes
+22:22:47.856 [kcp] kcp-rate: in=36412632 (+730438, 584.4 kbps) out=231812 (+26, 0.0 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #43600 1261 bytes
+[video] recv vp8 frame #43800 1261 bytes
+[vp8-reasm] interval frames=2603 gap_resets=244 depacket_errs=0 (cumulative frames=43853 gaps=3326 depacket=0)
+[video] recv vp8 frame #44000 1261 bytes
+[video] recv vp8 frame #44200 1261 bytes
+[video] recv vp8 frame #44400 1261 bytes
+22:22:57.856 [kcp] kcp-rate: in=37511749 (+1099117, 879.3 kbps) out=231935 (+123, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #44600 1261 bytes
+[video] recv vp8 frame #44800 1261 bytes
+[video] recv vp8 frame #45000 1261 bytes
+22:23:07.856 [kcp] kcp-rate: in=37815000 (+303251, 242.6 kbps) out=232066 (+131, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #45200 1261 bytes
+[video] recv vp8 frame #45400 1261 bytes
+[video] recv vp8 frame #45600 1261 bytes
+[video] recv vp8 frame #45800 1261 bytes
+[video] recv vp8 frame #46000 1261 bytes
+22:23:17.856 [kcp] kcp-rate: in=39061613 (+1246613, 997.3 kbps) out=232192 (+126, 0.1 kbps) srtt=61ms rto=81ms recv_drop=0
+[video] recv vp8 frame #46200 1261 bytes
+[vp8-reasm] interval frames=2486 gap_resets=165 depacket_errs=0 (cumulative frames=46339 gaps=3491 depacket=0)
+[video] recv vp8 frame #46400 1261 bytes
+[video] recv vp8 frame #46600 1261 bytes
+[video] recv vp8 frame #46800 1261 bytes
+22:23:27.856 [kcp] kcp-rate: in=39609333 (+547720, 438.2 kbps) out=232277 (+85, 0.1 kbps) srtt=60ms rto=76ms recv_drop=0
+[video] recv vp8 frame #47000 1261 bytes
+[video] recv vp8 frame #47200 1261 bytes
+[video] recv vp8 frame #47400 1261 bytes
+[video] recv vp8 frame #47600 1261 bytes
+22:23:37.856 [kcp] kcp-rate: in=40154762 (+545429, 436.3 kbps) out=232390 (+113, 0.1 kbps) srtt=60ms rto=76ms recv_drop=0
+[video] recv vp8 frame #47800 1261 bytes
+[video] recv vp8 frame #48000 1261 bytes
+[video] recv vp8 frame #48200 1261 bytes
+[video] recv vp8 frame #48400 1261 bytes
+[video] recv vp8 frame #48600 1261 bytes
+22:23:47.856 [kcp] kcp-rate: in=41009246 (+854484, 683.6 kbps) out=232529 (+139, 0.1 kbps) srtt=60ms rto=76ms recv_drop=0
+[video] recv vp8 frame #48800 1261 bytes
+[vp8-reasm] interval frames=2631 gap_resets=226 depacket_errs=0 (cumulative frames=48970 gaps=3717 depacket=0)
+[video] recv vp8 frame #49000 1261 bytes
+[video] recv vp8 frame #49200 1261 bytes
+[video] recv vp8 frame #49400 1261 bytes
+22:23:57.856 [kcp] kcp-rate: in=41505646 (+496400, 397.1 kbps) out=232642 (+113, 0.1 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #49600 1261 bytes
+[video] recv vp8 frame #49800 1261 bytes
+[video] recv vp8 frame #50000 1261 bytes
+[video] recv vp8 frame #50200 1261 bytes
+22:24:07.856 [kcp] kcp-rate: in=42860133 (+1354487, 1083.6 kbps) out=232703 (+61, 0.0 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #50400 1261 bytes
+[video] recv vp8 frame #50600 1261 bytes
+[video] recv vp8 frame #50800 1261 bytes
+[video] recv vp8 frame #51000 1261 bytes
+22:24:17.856 [kcp] kcp-rate: in=43515691 (+655558, 524.4 kbps) out=232764 (+61, 0.0 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #51200 1261 bytes
+[video] recv vp8 frame #51400 1261 bytes
+[vp8-reasm] interval frames=2622 gap_resets=226 depacket_errs=0 (cumulative frames=51592 gaps=3943 depacket=0)
+[video] recv vp8 frame #51600 1261 bytes
+[video] recv vp8 frame #51800 1261 bytes
+[video] recv vp8 frame #52000 1261 bytes
+22:24:27.856 [kcp] kcp-rate: in=44186388 (+670697, 536.6 kbps) out=232918 (+154, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #52200 1261 bytes
+[video] recv vp8 frame #52400 1261 bytes
+[video] recv vp8 frame #52600 1261 bytes
+[video] recv vp8 frame #52800 1261 bytes
+22:24:37.856 [kcp] kcp-rate: in=44902738 (+716350, 573.1 kbps) out=233032 (+114, 0.1 kbps) srtt=61ms rto=73ms recv_drop=0
+[video] recv vp8 frame #53000 1261 bytes
+[video] recv vp8 frame #53200 1261 bytes
+[video] recv vp8 frame #53400 1261 bytes
+[video] recv vp8 frame #53600 1261 bytes
+22:24:47.856 [kcp] kcp-rate: in=45705702 (+802964, 642.4 kbps) out=233050 (+18, 0.0 kbps) srtt=61ms rto=73ms recv_drop=0
+[video] recv vp8 frame #53800 1261 bytes
+[video] recv vp8 frame #54000 1261 bytes
+[video] recv vp8 frame #54200 1261 bytes
+[vp8-reasm] interval frames=2658 gap_resets=222 depacket_errs=0 (cumulative frames=54250 gaps=4165 depacket=0)
+[video] recv vp8 frame #54400 1261 bytes
+[video] recv vp8 frame #54600 1261 bytes
+22:24:57.856 [kcp] kcp-rate: in=46255866 (+550164, 440.1 kbps) out=233128 (+78, 0.1 kbps) srtt=61ms rto=73ms recv_drop=0
+[video] recv vp8 frame #54800 1261 bytes
+[video] recv vp8 frame #55000 1261 bytes
+[video] recv vp8 frame #55200 1261 bytes
+[video] recv vp8 frame #55400 1261 bytes
+[video] recv vp8 frame #55600 1261 bytes
+[video] recv vp8 frame #55800 1261 bytes
+22:25:07.856 [kcp] kcp-rate: in=47632437 (+1376571, 1101.3 kbps) out=234484 (+1356, 1.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #56000 1261 bytes
+[video] recv vp8 frame #56200 1261 bytes
+[video] recv vp8 frame #56400 1261 bytes
+[video] recv vp8 frame #56600 1261 bytes
+[video] recv vp8 frame #56800 1261 bytes
+22:25:17.856 [kcp] kcp-rate: in=48394512 (+762075, 609.7 kbps) out=242081 (+7597, 6.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #57000 1261 bytes
+[vp8-reasm] interval frames=2866 gap_resets=211 depacket_errs=0 (cumulative frames=57116 gaps=4376 depacket=0)
+[video] recv vp8 frame #57200 1261 bytes
+[video] recv vp8 frame #57400 1261 bytes
+22:25:27.856 [kcp] kcp-rate: in=48858026 (+463514, 370.8 kbps) out=242218 (+137, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #57600 1261 bytes
+[video] recv vp8 frame #57800 1261 bytes
+[video] recv vp8 frame #58000 1261 bytes
+[video] recv vp8 frame #58200 1261 bytes
+22:25:37.856 [kcp] kcp-rate: in=49494806 (+636780, 509.4 kbps) out=242253 (+35, 0.0 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #58400 1261 bytes
+[video] recv vp8 frame #58600 1261 bytes
+[video] recv vp8 frame #58800 1261 bytes
+[video] recv vp8 frame #59000 1261 bytes
+22:25:47.856 [kcp] kcp-rate: in=50552239 (+1057433, 845.9 kbps) out=242316 (+63, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #59200 1261 bytes
+[video] recv vp8 frame #59400 1261 bytes
+[video] recv vp8 frame #59600 1261 bytes
+[vp8-reasm] interval frames=2579 gap_resets=196 depacket_errs=0 (cumulative frames=59695 gaps=4572 depacket=0)
+[video] recv vp8 frame #59800 1261 bytes
+[video] recv vp8 frame #60000 1261 bytes
+22:25:57.856 [kcp] kcp-rate: in=51114960 (+562721, 450.2 kbps) out=242376 (+60, 0.0 kbps) srtt=57ms rto=67ms recv_drop=0
+[video] recv vp8 frame #60200 1261 bytes
+[video] recv vp8 frame #60400 1261 bytes
+[video] recv vp8 frame #60600 1261 bytes
+[video] recv vp8 frame #60800 1261 bytes
+[video] recv vp8 frame #61000 1261 bytes
+22:26:07.855 [kcp] kcp-rate: in=51828983 (+714023, 571.2 kbps) out=242411 (+35, 0.0 kbps) srtt=57ms rto=67ms recv_drop=0
+[video] recv vp8 frame #61200 1261 bytes
+[video] recv vp8 frame #61400 1261 bytes
+[video] recv vp8 frame #61600 1261 bytes
+[video] recv vp8 frame #61800 1261 bytes
+22:26:17.856 [kcp] kcp-rate: in=52654213 (+825230, 660.2 kbps) out=242429 (+18, 0.0 kbps) srtt=57ms rto=67ms recv_drop=0
+[video] recv vp8 frame #62000 1261 bytes
+[video] recv vp8 frame #62200 1261 bytes
+[vp8-reasm] interval frames=2616 gap_resets=229 depacket_errs=0 (cumulative frames=62311 gaps=4801 depacket=0)
+[video] recv vp8 frame #62400 1261 bytes
+[video] recv vp8 frame #62600 1261 bytes
+22:26:27.856 [kcp] kcp-rate: in=53170451 (+516238, 413.0 kbps) out=242531 (+102, 0.1 kbps) srtt=58ms rto=70ms recv_drop=0
+[video] recv vp8 frame #62800 1261 bytes
+[video] recv vp8 frame #63000 1261 bytes
+[video] recv vp8 frame #63200 1261 bytes
+[video] recv vp8 frame #63400 1261 bytes
+[video] recv vp8 frame #63600 1261 bytes
+22:26:37.856 [kcp] kcp-rate: in=54443919 (+1273468, 1018.8 kbps) out=242627 (+96, 0.1 kbps) srtt=60ms rto=76ms recv_drop=0
+[video] recv vp8 frame #63800 1261 bytes
+[video] recv vp8 frame #64000 1261 bytes
+[video] recv vp8 frame #64200 1261 bytes
+[video] recv vp8 frame #64400 1261 bytes
+[video] recv vp8 frame #64600 1261 bytes
+22:26:47.855 [kcp] kcp-rate: in=55053680 (+609761, 487.8 kbps) out=242653 (+26, 0.0 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #64800 1261 bytes
+[video] recv vp8 frame #65000 1261 bytes
+[video] recv vp8 frame #65200 1261 bytes
+[vp8-reasm] interval frames=2969 gap_resets=234 depacket_errs=0 (cumulative frames=65280 gaps=5035 depacket=0)
+[video] recv vp8 frame #65400 1261 bytes
+22:26:57.856 [kcp] kcp-rate: in=55813437 (+759757, 607.8 kbps) out=242724 (+71, 0.1 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #65600 1261 bytes
+[video] recv vp8 frame #65800 1261 bytes
+[video] recv vp8 frame #66000 1261 bytes
+[video] recv vp8 frame #66200 1261 bytes
+[video] recv vp8 frame #66400 1261 bytes
+22:27:07.856 [kcp] kcp-rate: in=56568468 (+755031, 604.0 kbps) out=242750 (+26, 0.0 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #66600 1261 bytes
+[video] recv vp8 frame #66800 1261 bytes
+[video] recv vp8 frame #67000 1261 bytes
+[video] recv vp8 frame #67200 1261 bytes
+22:27:17.856 [kcp] kcp-rate: in=57638257 (+1069789, 855.8 kbps) out=242821 (+71, 0.1 kbps) srtt=60ms rto=72ms recv_drop=0
+[video] recv vp8 frame #67400 1261 bytes
+[video] recv vp8 frame #67600 1261 bytes
+[video] recv vp8 frame #67800 1261 bytes
+[vp8-reasm] interval frames=2641 gap_resets=225 depacket_errs=0 (cumulative frames=67921 gaps=5260 depacket=0)
+[video] recv vp8 frame #68000 1261 bytes
+22:27:27.855 [kcp] kcp-rate: in=58268056 (+629799, 503.8 kbps) out=242897 (+76, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #68200 1261 bytes
+[video] recv vp8 frame #68400 1261 bytes
+[video] recv vp8 frame #68600 1261 bytes
+[video] recv vp8 frame #68800 1261 bytes
+22:27:37.855 [kcp] kcp-rate: in=58923551 (+655495, 524.4 kbps) out=243046 (+149, 0.1 kbps) srtt=60ms rto=70ms recv_drop=0
+[video] recv vp8 frame #69000 1261 bytes
+[video] recv vp8 frame #69200 1261 bytes
+[video] recv vp8 frame #69400 1261 bytes
+[video] recv vp8 frame #69600 1261 bytes
+[video] recv vp8 frame #69800 1261 bytes
+[video] recv vp8 frame #70000 1261 bytes
+22:27:47.855 [kcp] kcp-rate: in=60006179 (+1082628, 866.1 kbps) out=243347 (+301, 0.2 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #70200 1261 bytes
+[video] recv vp8 frame #70400 1261 bytes
+[video] recv vp8 frame #70600 1261 bytes
+[video] recv vp8 frame #70800 1261 bytes
+[vp8-reasm] interval frames=2965 gap_resets=259 depacket_errs=0 (cumulative frames=70886 gaps=5519 depacket=0)
+[video] recv vp8 frame #71000 1261 bytes
+22:27:57.856 [kcp] kcp-rate: in=60627802 (+621623, 497.3 kbps) out=243469 (+122, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #71200 1261 bytes
+[video] recv vp8 frame #71400 1261 bytes
+[video] recv vp8 frame #71600 1261 bytes
+[video] recv vp8 frame #71800 1261 bytes
+[video] recv vp8 frame #72000 1261 bytes
+22:28:07.856 [kcp] kcp-rate: in=61751537 (+1123735, 899.0 kbps) out=243723 (+254, 0.2 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #72200 1261 bytes
+[video] recv vp8 frame #72400 1261 bytes
+[video] recv vp8 frame #72600 1261 bytes
+22:28:17.855 [kcp] kcp-rate: in=62408281 (+656744, 525.4 kbps) out=243810 (+87, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #72800 1261 bytes
+[video] recv vp8 frame #73000 93 bytes
+[video] recv vp8 frame #73200 1261 bytes
+[video] recv vp8 frame #73400 1261 bytes
+[vp8-reasm] interval frames=2554 gap_resets=225 depacket_errs=0 (cumulative frames=73440 gaps=5744 depacket=0)
+[video] recv vp8 frame #73600 1261 bytes
+22:28:27.855 [kcp] kcp-rate: in=63068493 (+660212, 528.2 kbps) out=243921 (+111, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #73800 1261 bytes
+[video] recv vp8 frame #74000 1261 bytes
+[video] recv vp8 frame #74200 1261 bytes
+[video] recv vp8 frame #74400 1261 bytes
+22:28:37.855 [kcp] kcp-rate: in=63774403 (+705910, 564.7 kbps) out=244008 (+87, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #74600 1261 bytes
+[video] recv vp8 frame #74800 1261 bytes
+[video] recv vp8 frame #75000 1261 bytes
+[video] recv vp8 frame #75200 1261 bytes
+22:28:47.855 [kcp] kcp-rate: in=64503664 (+729261, 583.4 kbps) out=244130 (+122, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #75400 1261 bytes
+[video] recv vp8 frame #75600 1261 bytes
+[video] recv vp8 frame #75800 1261 bytes
+[video] recv vp8 frame #76000 1261 bytes
+[vp8-reasm] interval frames=2613 gap_resets=236 depacket_errs=0 (cumulative frames=76053 gaps=5980 depacket=0)
+[video] recv vp8 frame #76200 1261 bytes
+22:28:57.856 [kcp] kcp-rate: in=65345150 (+841486, 673.2 kbps) out=244182 (+52, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #76400 1261 bytes
+[video] recv vp8 frame #76600 1261 bytes
+[video] recv vp8 frame #76800 1261 bytes
+22:29:07.855 [kcp] kcp-rate: in=65843850 (+498700, 399.0 kbps) out=244217 (+35, 0.0 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #77000 1261 bytes
+[video] recv vp8 frame #77200 1261 bytes
+[video] recv vp8 frame #77400 1261 bytes
+[video] recv vp8 frame #77600 1261 bytes
+[video] recv vp8 frame #77800 1261 bytes
+22:29:17.855 [kcp] kcp-rate: in=66899677 (+1055827, 844.7 kbps) out=244304 (+87, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #78000 1261 bytes
+[video] recv vp8 frame #78200 1261 bytes
+[video] recv vp8 frame #78400 1261 bytes
+[video] recv vp8 frame #78600 1261 bytes
+[vp8-reasm] interval frames=2567 gap_resets=251 depacket_errs=0 (cumulative frames=78620 gaps=6231 depacket=0)
+22:29:27.856 [kcp] kcp-rate: in=67494272 (+594595, 475.7 kbps) out=244398 (+94, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #78800 1261 bytes
+[video] recv vp8 frame #79000 1261 bytes
+[video] recv vp8 frame #79200 1261 bytes
+[video] recv vp8 frame #79400 1261 bytes
+22:29:37.855 [kcp] kcp-rate: in=68396844 (+902572, 722.1 kbps) out=244485 (+87, 0.1 kbps) srtt=57ms rto=67ms recv_drop=0
+[video] recv vp8 frame #79600 1261 bytes
+[video] recv vp8 frame #79800 1261 bytes
+[video] recv vp8 frame #80000 1261 bytes
+[video] recv vp8 frame #80200 1261 bytes
+22:29:47.856 [kcp] kcp-rate: in=69172908 (+776064, 620.9 kbps) out=244511 (+26, 0.0 kbps) srtt=57ms rto=67ms recv_drop=0
+[video] recv vp8 frame #80400 1261 bytes
+[video] recv vp8 frame #80600 1261 bytes
+[video] recv vp8 frame #80800 1261 bytes
+[video] recv vp8 frame #81000 1261 bytes
+[video] recv vp8 frame #81200 24 bytes
+[vp8-reasm] interval frames=2581 gap_resets=180 depacket_errs=0 (cumulative frames=81201 gaps=6411 depacket=0)
+22:29:57.855 [kcp] kcp-rate: in=69794394 (+621486, 497.2 kbps) out=244598 (+87, 0.1 kbps) srtt=57ms rto=69ms recv_drop=0
+[video] recv vp8 frame #81400 1261 bytes
+[video] recv vp8 frame #81600 1261 bytes
+[video] recv vp8 frame #81800 1261 bytes
+22:30:07.855 [kcp] kcp-rate: in=70329293 (+534899, 427.9 kbps) out=245293 (+695, 0.6 kbps) srtt=57ms rto=69ms recv_drop=0
+[video] recv vp8 frame #82000 1261 bytes
+[video] recv vp8 frame #82200 230 bytes
+[video] recv vp8 frame #82400 1261 bytes
+[video] recv vp8 frame #82600 1261 bytes
+[video] recv vp8 frame #82800 1261 bytes
+[video] recv vp8 frame #83000 1261 bytes
+22:30:17.855 [kcp] kcp-rate: in=71628630 (+1299337, 1039.5 kbps) out=253472 (+8179, 6.5 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #83200 1261 bytes
+[video] recv vp8 frame #83400 1261 bytes
+[video] recv vp8 frame #83600 1261 bytes
+[video] recv vp8 frame #83800 1261 bytes
+[vp8-reasm] interval frames=2654 gap_resets=178 depacket_errs=0 (cumulative frames=83855 gaps=6589 depacket=0)
+22:30:27.855 [kcp] kcp-rate: in=72231419 (+602789, 482.2 kbps) out=253567 (+95, 0.1 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #84000 1261 bytes
+[video] recv vp8 frame #84200 1261 bytes
+[video] recv vp8 frame #84400 1261 bytes
+[video] recv vp8 frame #84600 1261 bytes
+[video] recv vp8 frame #84800 1261 bytes
+22:30:37.855 [kcp] kcp-rate: in=73239484 (+1008065, 806.5 kbps) out=253602 (+35, 0.0 kbps) srtt=59ms rto=69ms recv_drop=0
+[video] recv vp8 frame #85000 1261 bytes
+[video] recv vp8 frame #85200 1261 bytes
+[video] recv vp8 frame #85400 1261 bytes
+[video] recv vp8 frame #85600 1261 bytes
+22:30:47.855 [kcp] kcp-rate: in=73964083 (+724599, 579.7 kbps) out=254070 (+468, 0.4 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #85800 1261 bytes
+[video] recv vp8 frame #86000 1261 bytes
+[video] recv vp8 frame #86200 1261 bytes
+[video] recv vp8 frame #86400 1261 bytes
+[video] recv vp8 frame #86600 1261 bytes
+[vp8-reasm] interval frames=2754 gap_resets=145 depacket_errs=0 (cumulative frames=86609 gaps=6734 depacket=0)
+22:30:57.855 [kcp] kcp-rate: in=74589028 (+624945, 500.0 kbps) out=254133 (+63, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #86800 1261 bytes
+[video] recv vp8 frame #87000 1261 bytes
+[video] recv vp8 frame #87200 1261 bytes
+[video] recv vp8 frame #87400 1261 bytes
+22:31:07.855 [kcp] kcp-rate: in=75383899 (+794871, 635.9 kbps) out=254195 (+62, 0.0 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #87600 1261 bytes
+[video] recv vp8 frame #87800 1261 bytes
+[video] recv vp8 frame #88000 1261 bytes
+[video] recv vp8 frame #88200 1261 bytes
+22:31:17.855 [kcp] kcp-rate: in=76040562 (+656663, 525.3 kbps) out=254311 (+116, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #88400 1261 bytes
+[video] recv vp8 frame #88600 1261 bytes
+[video] recv vp8 frame #88800 1261 bytes
+[video] recv vp8 frame #89000 1261 bytes
+[vp8-reasm] interval frames=2460 gap_resets=118 depacket_errs=0 (cumulative frames=89069 gaps=6852 depacket=0)
+22:31:27.855 [kcp] kcp-rate: in=76700720 (+660158, 528.1 kbps) out=254435 (+124, 0.1 kbps) srtt=83ms rto=239ms recv_drop=0
+[video] recv vp8 frame #89200 1261 bytes
+[video] recv vp8 frame #89400 1261 bytes
+[video] recv vp8 frame #89600 1261 bytes
+[video] recv vp8 frame #89800 1261 bytes
+[video] recv vp8 frame #90000 1261 bytes
+22:31:37.855 [kcp] kcp-rate: in=77811553 (+1110833, 888.7 kbps) out=254566 (+131, 0.1 kbps) srtt=97ms rto=285ms recv_drop=0
+[video] recv vp8 frame #90200 1261 bytes
+[video] recv vp8 frame #90400 1261 bytes
+[video] recv vp8 frame #90600 1261 bytes
+[video] recv vp8 frame #90800 1261 bytes
+[video] recv vp8 frame #91000 1261 bytes
+22:31:47.855 [kcp] kcp-rate: in=78414351 (+602798, 482.2 kbps) out=254575 (+9, 0.0 kbps) srtt=97ms rto=285ms recv_drop=0
+[video] recv vp8 frame #91200 1261 bytes
+[video] recv vp8 frame #91400 24 bytes
+[vp8-reasm] interval frames=2518 gap_resets=122 depacket_errs=0 (cumulative frames=91587 gaps=6974 depacket=0)
+22:31:57.855 [kcp] kcp-rate: in=79358622 (+944271, 755.4 kbps) out=265796 (+11221, 9.0 kbps) srtt=67ms rto=79ms recv_drop=0
+[video] recv vp8 frame #91600 24 bytes
