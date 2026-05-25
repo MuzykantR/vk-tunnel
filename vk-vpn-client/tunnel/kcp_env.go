@@ -35,6 +35,13 @@ type KCPConfig struct {
 	// WriteDelay=false flushes user writes immediately into KCP send
 	// buffer. Default for us: false (low-latency).
 	WriteDelay bool
+
+	// ProbeKeepalivePPS, when > 0, runs an additional keepalive emitter
+	// in parallel with the idle-gated one. Used to inject synthetic
+	// pps load and observe whether the TURN policer is per-track or
+	// per-session — see docs/THROUGHPUT_PLAN.md T2.
+	// 0 disables the probe entirely (production behavior).
+	ProbeKeepalivePPS int
 }
 
 func defaultKCPConfig() KCPConfig {
@@ -107,6 +114,12 @@ func KCPConfigFromEnv() KCPConfig {
 		}
 		if len(ints) == 4 {
 			cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion = ints[0], ints[1], ints[2], ints[3]
+		}
+	}
+
+	if v := os.Getenv("VK_VPN_KCP_PROBE_KEEPALIVE_PPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
+			cfg.ProbeKeepalivePPS = n
 		}
 	}
 

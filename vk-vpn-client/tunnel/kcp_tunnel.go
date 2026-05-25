@@ -132,10 +132,11 @@ func NewKCPTunnel(track *webrtc.TrackLocalStaticSample, obf *TunnelObfuscator, l
 	// stream_mode=false is the only correct setting — see SetStreamMode
 	// block above. We log it explicitly so the diagnostic log shows
 	// at-a-glance whether both peers actually agree on framing semantics.
-	t.logFn("kcp: tunnel ready conv=0x%08x mtu=%d window=%d/%d fec=%d/%d nodelay=%d,%d,%d,%d stream_mode=false",
+	t.logFn("kcp: tunnel ready conv=0x%08x mtu=%d window=%d/%d fec=%d/%d nodelay=%d,%d,%d,%d stream_mode=false probe_pps=%d",
 		kcpConvID, cfg.MTU, cfg.SendWindow, cfg.RecvWindow,
 		cfg.DataShards, cfg.ParityShards,
-		cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion)
+		cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion,
+		cfg.ProbeKeepalivePPS)
 	return t, nil
 }
 
@@ -149,6 +150,9 @@ func (t *KCPTunnel) Start(_, _ int) {
 	go t.readLoop()
 	go t.keepaliveLoop()
 	go t.metricsLoop()
+	if t.cfg.ProbeKeepalivePPS > 0 {
+		go t.probeKeepaliveLoop()
+	}
 }
 
 // SendData enqueues data into the KCP session's send buffer. Blocks if
@@ -311,6 +315,37 @@ func (t *KCPTunnel) keepaliveLoop() {
 				continue
 			}
 			t.lastSentNs.Store(time.Now().UnixNano())
+		}
+	}
+}
+
+// probeKeepaliveLoop emits extra synthetic VP8 keepalive samples at a
+// fixed rate, independent of the data-flow gate used by keepaliveLoop.
+// Purpose: inject controlled pps load on the same track to diagnose
+// whether VK TURN's policer is per-track or per-session — see T2 in
+// docs/THROUGHPUT_PLAN.md. NOT for production use; gated by env
+// VK_VPN_KCP_PROBE_KEEPALIVE_PPS > 0.
+func (t *KCPTunnel) probeKeepaliveLoop() {
+	if t.obf == nil || t.cfg.ProbeKeepalivePPS <= 0 {
+		return
+	}
+	interval := time.Second / time.Duration(t.cfg.ProbeKeepalivePPS)
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	t.logFn("kcp: PROBE keepalive loop active — %d pps (interval=%v)", t.cfg.ProbeKeepalivePPS, interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case <-ticker.C:
+			sample := t.obf.EncodeKeepalive()
+			_ = t.track.WriteSample(media.Sample{Data: sample, Duration: kcpVP8SampleDuration})
+			// Intentionally do NOT update lastSentNs — the idle-gated
+			// keepaliveLoop should still run independently if KCP itself
+			// stalls. Probe is purely additive load.
 		}
 	}
 }
