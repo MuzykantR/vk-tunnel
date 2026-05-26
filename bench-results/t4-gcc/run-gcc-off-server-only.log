@@ -1,0 +1,175 @@
+Tunnel mode = kcp (source: CLI flag --tunnel-mode)
+[WebView2] Environment created successfully
+App Started
+Connecting to VPN via URI: myvpn://v1:GtEvFc297kuEuNrC:UuBX2kXZ404WOcGqFyw13fGNkIejj6ByrTucRdzoJrEJpT1gbgsdbCbowaQvKy5584XZKO7dTz141U25MfFDNGQwnMQA43W5dC8J1n7a86vk7TtttAPaSqt9oSJ9t-I4Ukf8eVKHZPE2o1LtkKteP7oOOZUePhJrHqCO2DgwdWXQHHWxEvwiP2UtUXyAgCFjhx_FkVXRobn5IQ
+Force-removing adapter: WLVPN
+Adapter WLVPN removal: PowerShell+netsh both failed (output: )
+Performing deep network cleanup (the 'reboot effect')...
+Force-removing adapter: WLVPN
+Adapter WLVPN removal: PowerShell+netsh both failed (output: )
+Network cleanup completed successfully.
+DefaultGateway: 192.168.1.1 via ����஢����� ���� 2 (metric=0)
+Physical default gateway: 192.168.1.1
+Resolving VK session over clean network...
+Successfully decrypted URI. Link: https://vk.com/call/join/yLgN7-igFobk4d_8gcMG-gB0_Qp0687ZW_trzgjjANI
+Captcha required by VK. Launching browser for interactive verification...
+Opening captcha in browser: http://127.0.0.1:50487/
+Captcha solved successfully! Retrying API call...
+Session resolved; 7 known bypass IPs from TURN/STUN/API
+Starting tun2socks engine...
+Starting tun2socks: device=tun://WLVPN proxy=socks5://127.0.0.1:1080 mtu=1400
+Using existing driver 0.14
+Creating adapter
+tun2socks engine running
+Found tun2socks adapter: 'WLVPN'
+Using TUN adapter: WLVPN
+Assigning IP 10.8.0.2/255.255.255.0 to interface 'WLVPN'...
+TUN MTU=1400 (env VK_VPN_MTU, default 1400)
+Setting MTU of WLVPN to 1400...
+Extra bypass IPs (VK_VPN_EXTRA_BYPASS_IPS): [185.103.101.245]
+Installing bypass /32 routes for all known TURN/STUN/API hosts...
+Adding direct route for vk.com (87.240.129.133) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.67) via 192.168.1.1
+Adding direct route for vk.com (87.240.137.164) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.78) via 192.168.1.1
+Adding direct route for vk.com (87.240.132.72) via 192.168.1.1
+Adding direct route for vk.com (93.186.225.194) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.78) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.67) via 192.168.1.1
+Adding direct route for vk.ru (93.186.225.194) via 192.168.1.1
+Adding direct route for vk.ru (87.240.129.133) via 192.168.1.1
+Adding direct route for vk.ru (87.240.137.164) via 192.168.1.1
+Adding direct route for vk.ru (87.240.132.72) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.156.72) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.152.226) via 192.168.1.1
+Adding direct route for okcdn.ru (217.20.155.82) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.155.82) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.152.226) via 192.168.1.1
+Adding direct route for mycdn.me (217.20.156.72) via 192.168.1.1
+Adding direct route for stun.l.google.com (74.125.250.129) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.72) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.78) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.129.133) via 192.168.1.1
+Adding direct route for stun.vk.com (93.186.225.194) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.137.164) via 192.168.1.1
+Adding direct route for stun.vk.com (87.240.132.67) via 192.168.1.1
+Adding direct route for videowebrtc.okcdn.ru (155.212.204.196) via 192.168.1.1
+Adding direct route for videowebrtc.okcdn.ru (155.212.204.11) via 192.168.1.1
+Adding TURN/STUN bypass route for 95.163.34.180 via 192.168.1.1
+Adding TURN/STUN bypass route for 90.156.236.89 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.195 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.136 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.12 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.196 via 192.168.1.1
+Adding TURN/STUN bypass route for 155.212.204.11 via 192.168.1.1
+Adding TURN/STUN bypass route for 185.103.101.245 via 192.168.1.1
+Adding direct route for VK subnet 87.240.128.0/18 via 192.168.1.1
+Adding direct route for VK subnet 93.186.224.0/20 via 192.168.1.1
+Adding direct route for VK subnet 95.142.192.0/18 via 192.168.1.1
+Adding direct route for VK subnet 185.32.248.0/22 via 192.168.1.1
+Adding direct route for VK subnet 185.180.200.0/22 via 192.168.1.1
+Adding direct route for VK subnet 217.20.144.0/20 via 192.168.1.1
+Adding direct route for VK subnet 217.20.154.0/23 via 192.168.1.1
+Adding direct route for VK subnet 95.213.0.0/17 via 192.168.1.1
+Adding direct route for VK subnet 79.137.128.0/18 via 192.168.1.1
+Adding DNS bypass route for gateway 192.168.1.1
+Starting VPN Core Client (ICE/DTLS/DC) on prepared routing table...
+Joiner: obfuscator on (epoch=0x9bcf476a)
+Joiner: using pre-resolved session params, turn=[turn:95.163.34.180:19302 turn:90.156.236.89:19302]
+Connected to VK WebSocket successfully
+Updated TURN servers: [turn:95.163.34.180:19302 turn:90.156.236.89:19302]
+14:11:34.837 [ice] ICETransportPolicy=relay (TURN only — testing default; release: VK_VPN_ICE_TRANSPORT_POLICY=all)
+14:11:34.837 [ice] RelayAcceptanceMinWait skipped (ICETransportPolicy=relay)
+Joiner: media engine: GCC=true
+Joiner: PC ready (tunnel=kcp), waiting for offer
+Registered peer ID: 1125899981254525
+Remote SDP: offer (signalingState=stable, answerSent=false)
+Client ICE state: checking
+Client connection state: connecting (tunnel=kcp)
+Sent SDP answer to creator
+[bypass] remote ICE candidate IP: 90.156.236.89
+Dynamic bypass for new ICE IP: 90.156.236.89
+Dynamic bypass (candidate): candidate:3285180552 1 udp 16777215 90.156.236.89 62255 typ relay raddr 0.0.0.0 rport 43522
+[bypass] remote ICE candidate IP: 95.163.34.180
+Dynamic bypass for new ICE IP: 95.163.34.180
+Dynamic bypass (candidate): candidate:612664447 1 udp 16777215 95.163.34.180 56184 typ relay raddr 0.0.0.0 rport 47169
+Client ICE state: connected
+14:11:37.383 [joiner] first ICE connected
+14:11:37.383 [joiner] ICE candidates in stats: relay/udp:38431@95.163.34.180 relay/udp:42759@90.156.236.89
+14:11:37.383 [joiner] ICE selected nominated relay/udp:38431 <-> relay/udp:62255 (95.163.34.180 -> 90.156.236.89)
+14:11:37.383 [joiner] ICE uses TURN relay (local side) 95.163.34.180 -> 90.156.236.89; slower than host/srflx — increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass
+Client connection state: connected (tunnel=kcp)
+Joiner: === KCP-OVER-VP8 TUNNEL CONNECTED ===
+14:11:37.562 [kcp] kcp: tunnel ready conv=0x564b5650 mtu=1200 window=2048/2048 fec=10/3 nodelay=1,10,2,1 stream_mode=false probe_pps=0
+SOCKS5 via RelayBridge (kcp) on 127.0.0.1:1080
+VPN tunnel ready (DC or VP8)
+14:11:37.562 [relay] relay: SOCKS5 on 127.0.0.1:1080 (mode=joiner)
+ICE on TURN relay — waiting up to 3s for direct host/srflx (elapsed 0s, bypass [95.163.34.180 90.156.236.89])
+VPN tunnel DataChannel open (mode=kcp)
+Joiner: remote track video/VP8 id="video" bond-idx=0
+[video] recv vp8 frame #1 24 bytes
+[video] recv vp8 frame #2 24 bytes
+[video] recv vp8 frame #3 24 bytes
+ICE on TURN relay — waiting up to 2s for direct host/srflx (elapsed 1s, bypass [95.163.34.180 90.156.236.89])
+ICE on TURN relay — waiting up to 1s for direct host/srflx (elapsed 2s, bypass [95.163.34.180 90.156.236.89])
+ICE bypass via TURN relay (no direct pair in 3s): [95.163.34.180 90.156.236.89]
+Default redirect attempt 1/2 (WLB + nominated pair bypass)
+[bypass] WS endpoint host: videowebrtc.okcdn.ru
+Bypass routes flushed (pre-redirect)
+Redirecting all traffic to TUN adapter...
+Added route 0.0.0.0/1 via WLVPN nexthop=10.8.0.1 metric=2
+Added route 128.0.0.0/1 via WLVPN nexthop=10.8.0.1 metric=2
+[bypass] WS endpoint host: videowebrtc.okcdn.ru
+14:11:42.325 [kcp] kcp: read#1 n=9 head=00 00 00 05 00 00 00 01 02
+ICE held connected/completed for 5s (informational; redirect may already be active)
+14:11:42.385 [kcp] kcp: read#2 n=9 head=00 00 00 05 00 00 00 01 05
+14:11:42.516 [kcp] kcp: read#3 n=9 head=00 00 00 05 00 00 00 02 02
+14:11:42.629 [kcp] kcp: read#4 n=196 head=00 00 00 c0 00 00 00 02 04 48 54 54 50 2f 31 2e
+14:11:42.629 [kcp] kcp: read#5 n=9 head=00 00 00 05 00 00 00 02 05
+14:11:42.629 [relay] relay: joiner close id=2 after inbound grace
+Bypass routes flushed (post-redirect)
+14:11:47.562 [kcp] kcp-rate: in=9390 (+9390, 7.5 kbps) out=8751 (+8751, 7.0 kbps) srtt=64ms rto=104ms recv_drop=0
+ICE stable 5s after redirect attempt 1
+VPN Connected Successfully!
+14:11:57.562 [kcp] kcp-rate: in=9525 (+135, 0.1 kbps) out=11552 (+2801, 2.2 kbps) srtt=58ms rto=68ms recv_drop=0
+[video] recv vp8 frame #200 24 bytes
+Registered peer ID: 1125899981254525
+Client ICE state: disconnected
+Client connection state: disconnected (tunnel=kcp)
+ICE disconnect 18s after redirect — rolling back split default routes (WLB-style)
+[bypass] WS endpoint host: videowebrtc.okcdn.ru
+Bypass routes flushed (ice-rollback)
+14:12:07.383 [joiner] ICE selected nominated relay/udp:38431 <-> relay/udp:62255 (95.163.34.180 -> 90.156.236.89)
+14:12:07.384 [joiner] ICE uses TURN relay (local side) 95.163.34.180 -> 90.156.236.89; slower than host/srflx — increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass
+14:12:07.562 [kcp] kcp-rate: in=9660 (+135, 0.1 kbps) out=19633 (+8081, 6.5 kbps) srtt=59ms rto=71ms recv_drop=0
+14:12:17.562 [kcp] kcp-rate: in=9660 (+0, 0.0 kbps) out=19651 (+18, 0.0 kbps) srtt=59ms rto=71ms recv_drop=0
+ICE still disconnected after 20s — requesting ICE restart
+ICE restart: suppressed (39s after redirect — use route rollback / STUN recovery)
+14:12:27.562 [tunnel] watchdog: 3 missed pongs
+14:12:27.562 [tunnel] watchdog: missed pongs on TURN relay path — ICE restart suppressed (restart rarely fixes relay)
+Client ICE state: failed
+Client connection state: failed (tunnel=kcp)
+ICE state: failed — requesting ICE restart immediately
+ICE restart: suppressed (44s after redirect — use route rollback / STUN recovery)
+14:12:37.562 [kcp] kcp-rate: in=9660 (+0, 0.0 kbps) out=19669 (+18, 0.0 kbps) srtt=59ms rto=71ms recv_drop=0
+14:12:47.563 [kcp] kcp-rate: in=9660 (+0, 0.0 kbps) out=19678 (+9, 0.0 kbps) srtt=59ms rto=71ms recv_drop=0
+14:12:57.562 [tunnel] watchdog: 3 missed pongs
+14:12:57.563 [tunnel] watchdog unhealthy — ICE restart
+ICE restart: suppressed (1m10s after redirect — use route rollback / STUN recovery)
+14:13:07.563 [kcp] kcp-rate: in=9660 (+0, 0.0 kbps) out=19696 (+18, 0.0 kbps) srtt=59ms rto=71ms recv_drop=0
+Disconnecting VPN...
+Joiner: closing...
+14:13:26.584 [kcp] kcp: session.Read closed
+Client ICE state: closed
+Client connection state: closed (tunnel=kcp)
+VK WS read error: read tcp 192.168.1.103:51641->155.212.204.196:443: use of closed network connection
+Joiner: closed.
+VPN Client stopped.
+tun2socks engine stopped
+Cleaning up routing tables...
+netsh interface ipv4 delete route prefix=0.0.0.0/1 interface=WLVPN failed: exit status 1 (Элемент не найден.)
+netsh interface ipv4 delete route prefix=128.0.0.0/1 interface=WLVPN failed: exit status 1 (Элемент не найден.)
+Removed 33 bypass routes
+Force-removing adapter: WLVPN
+Adapter WLVPN removal: PowerShell+netsh both failed (output: )
+VPN Disconnected.

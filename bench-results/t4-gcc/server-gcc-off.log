@@ -1,0 +1,92 @@
+[boot] log file: /var/log/vk-vpn-daemon.log (truncated on start)
+[boot] env: VK_VPN_TUNNEL_MODE=kcp
+[boot] env: VK_VPN_KCP_BONDING_TRACKS=1
+[boot] env: VK_VPN_KCP_FEC=(default)
+[boot] env: VK_VPN_KCP_WINDOW=(default)
+[boot] env: VK_VPN_KCP_MTU=(default)
+[boot] env: VK_VPN_KCP_NODELAY=(default)
+[boot] env: VK_VPN_KCP_PROBE_KEEPALIVE_PPS=(default)
+[boot] env: VK_VPN_DISABLE_GCC=1
+[config] resources=unlimited read-buf=65536 max-dc-buf=8388608 mem-limit=268435456
+Starting VPN Creator Daemon...
+Initiating new call session (calls.start)...
+Starting VK call via API for peer: 2000000001
+Starting local API server on 127.0.0.1:8080
+Call created, OK Join Link: yLgN7-igFobk4d_8gcMG-gB0_Qp0687ZW_trzgjjANI, VK Join Link: https://vk.com/call/join/yLgN7-igFobk4d_8gcMG-gB0_Qp0687ZW_trzgjjANI
+New Call created! Active link: https://vk.com/call/join/yLgN7-igFobk4d_8gcMG-gB0_Qp0687ZW_trzgjjANI (TTL 2h0m0s)
+14:06:50.144 [ice] ICETransportPolicy=relay (TURN only ??? testing default; release: VK_VPN_ICE_TRANSPORT_POLICY=all)
+14:06:50.145 [ice] RelayAcceptanceMinWait skipped (ICETransportPolicy=relay)
+[creator] media engine: GCC=false
+[creator] obfuscator on (epoch=0xf348cd74)
+[creator] PeerConnection ready (2 ICE servers)
+[p2p] Offer ready, SDP len=1187
+14:06:50.341 [vk-ws] connected
+[vk-ws] -> change-media-settings
+Creator bridge running (whitelist-bypass DIRECT P2P mode)
+14:06:50.362 [vk-ws] TURN / connection params
+14:06:50.362 [vk-ws] notification settings-update
+14:11:25.612 [vk-ws] participant 578789871227 joined (total 1 topo=DIRECT)
+[p2p] Peer registered: 578789871227 (topology=DIRECT, old=<nil>)
+[p2p] Sending offer to peer 578789871227
+[vk-ws] -> transmit-data (peer 578789871227)
+[vk-ws] -> transmit-data (peer 578789871227)
+[vk-ws] -> transmit-data (peer 578789871227)
+[vk-ws] -> transmit-data (peer 578789871227)
+[p2p] Peer registered: 578789871227 (topology=DIRECT, old=0xc0002663e8)
+[p2p] Same peer 578789871227 already registered, skipping duplicate
+14:11:34.585 [vk-ws] notification media-settings-changed
+[p2p] Remote SDP: answer (signalingState=have-local-offer)
+14:11:34.790 [creator] ICE checking
+14:11:34.790 [creator] PC connecting
+14:11:37.001 [creator] ICE connected
+14:11:37.002 [creator] ICE candidates in stats: relay/udp:42759@90.156.236.89 relay/udp:56184@95.163.34.180
+14:11:37.002 [creator] ICE selected nominated relay/udp:62255 <-> relay/udp:38431 (90.156.236.89 -> 95.163.34.180)
+14:11:37.002 [creator] ICE uses TURN relay (local side) 90.156.236.89 -> 95.163.34.180; slower than host/srflx ??? increase VK_VPN_ICE_RELAY_WAIT or check STUN/UDP bypass
+14:11:37.121 [creator] PC connected
+[creator] tunnel DataChannel open ??? relay bridge active
+[creator] === MODE: KCP-OVER-VP8 ===
+kcp: tunnel ready conv=0x564b5650 mtu=1200 window=2048/2048 fec=10/3 nodelay=1,10,2,1 stream_mode=false probe_pps=0
+[video] recv vp8 frame #1 24 bytes
+[video] recv vp8 frame #2 24 bytes
+[video] recv vp8 frame #3 24 bytes
+kcp: read#1 n=24 head=00 00 00 14 00 00 00 01 01 37 39 2e 31 33 33 2e
+kcp: read#2 n=9 head=00 00 00 05 00 00 00 01 05
+relay: close id=1 79.133.169.7:80 rx=0 tunnel_pending=0 flushed=1
+14:11:41.945 [dc] close id=1 79.133.169.7:80 tx=0 rx=0 active=0
+kcp: read#3 n=23 head=00 00 00 13 00 00 00 02 01 32 2e 31 36 2e 31 37
+kcp: read#4 n=163 head=00 00 00 9f 00 00 00 02 04 47 45 54 20 2f 63 6f
+relay: close id=2 2.16.171.83:80 rx=187 tunnel_pending=0 flushed=1
+kcp: read#5 n=9 head=00 00 00 05 00 00 00 02 05
+14:11:42.248 [dc] close id=2 2.16.171.83:80 tx=154 rx=187 active=0
+relay: close id=4 62.76.91.139:443 rx=0 tunnel_pending=0 flushed=1
+14:11:44.883 [dc] close id=4 62.76.91.139:443 tx=0 rx=0 active=1
+kcp-rate: in=8760 (+8760, 7.0 kbps) out=9399 (+9399, 7.5 kbps) srtt=58ms rto=68ms recv_drop=0
+relay: close id=5 95.167.139.6:80 rx=0 tunnel_pending=0 flushed=1
+14:11:47.677 [dc] close id=5 95.167.139.6:80 tx=0 rx=0 active=1
+kcp-rate: in=11552 (+2792, 2.2 kbps) out=9534 (+135, 0.1 kbps) srtt=58ms rto=68ms recv_drop=0
+relay: close id=6 79.133.169.7:443 rx=0 tunnel_pending=0 flushed=1
+14:11:57.921 [dc] close id=6 79.133.169.7:443 tx=0 rx=0 active=1
+[video] recv vp8 frame #200 459 bytes
+[vk-ws] read error: websocket: close 1000 (normal): Bye
+Creator bridge WS closed
+relay: close id=3 40.79.141.154:443 rx=9284 tunnel_pending=0 flushed=1
+14:11:59.265 [dc] close id=3 40.79.141.154:443 tx=13860 rx=9284 active=-1
+kcp: session.Read closed
+[creator] dc read loop exiting: EOF
+Creator bridge ended ??? rejoin same call in 3s (WLB model)
+14:11:59.266 [creator] PC closed
+14:11:59.266 [creator] ICE closed
+Rejoining existing call (no calls.start)...
+[signaling] Rejoined existing call (OK token), new WS endpoint
+14:12:03.134 [ice] ICETransportPolicy=relay (TURN only ??? testing default; release: VK_VPN_ICE_TRANSPORT_POLICY=all)
+14:12:03.134 [ice] RelayAcceptanceMinWait skipped (ICETransportPolicy=relay)
+[creator] media engine: GCC=false
+[creator] obfuscator on (epoch=0xe2d2738f)
+[creator] PeerConnection ready (2 ICE servers)
+[p2p] Offer ready, SDP len=1182
+14:12:03.344 [vk-ws] connected
+[vk-ws] -> change-media-settings
+Creator bridge running (whitelist-bypass DIRECT P2P mode)
+14:12:03.349 [vk-ws] TURN / connection params
+14:12:03.350 [vk-ws] notification settings-update
+14:14:55.988 [vk-ws] participant 578789871227 left (total 0)
