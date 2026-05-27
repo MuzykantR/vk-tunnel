@@ -1,4 +1,4 @@
-.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy deploy-server deploy-daemon deploy-bot logs-daemon logs-bot wrap wrap-show
+.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy deploy-server deploy-daemon deploy-bot logs-daemon logs-bot wrap wrap-clear wrap-show
 
 # Путь к проекту на сервере
 DIR = /opt/vk-vpn
@@ -69,44 +69,48 @@ logs-daemon-journal:
 logs-bot:
 	sudo journalctl -u vk-vpn-bot -f
 
-# Включить / выключить protocol-aware WRAP обфускацию TURN ChannelData
-# payload'а на сервере. Использует systemd drop-in, чтобы не править
-# основной unit-файл и не сбивать git diff.
+# Toggle protocol-aware WRAP obfuscation of the TURN ChannelData
+# payload on the server. Default in the binary is ON, so the drop-in
+# is only needed to *disable* (N=0) for A/B comparison. Using a
+# systemd drop-in keeps the main unit file untouched / git-clean.
 #
-# Использование:
-#   make wrap N=1     — включить (создаёт drop-in, daemon-reload, restart)
-#   make wrap N=0     — выключить (удаляет drop-in, daemon-reload, restart)
-#   make wrap-show    — показать текущее состояние и последние строки лога
+# Usage:
+#   make wrap N=1     — explicit enable (writes VK_VPN_TURN_WRAP=1 drop-in)
+#   make wrap N=0     — disable (writes VK_VPN_TURN_WRAP=0 drop-in)
+#   make wrap-clear   — remove drop-in, restore binary default (= ON)
+#   make wrap-show    — current state + recent log lines
 #
-# На клиенте (Windows) флаг ставится вручную перед запуском EXE:
-#   PowerShell:  $env:VK_VPN_TURN_WRAP = "1"
-#   cmd.exe:     set VK_VPN_TURN_WRAP=1
+# Client side (Windows) needs the same flag:
+#   default behaviour (ON):  no env var needed
+#   explicit disable:        PowerShell  $env:VK_VPN_TURN_WRAP = "0"
+#                            cmd.exe     set VK_VPN_TURN_WRAP=0
 wrap:
 	@if [ -z "$(N)" ]; then \
 		echo "Usage: make wrap N=1 (enable) or make wrap N=0 (disable)"; \
+		echo "       make wrap-clear to remove drop-in and restore binary default (ON)"; \
 		exit 1; \
 	fi; \
 	case "$(N)" in \
-		1) \
-			echo "Enabling VK_VPN_TURN_WRAP=1 via systemd drop-in..."; \
+		1|0) \
+			echo "Setting VK_VPN_TURN_WRAP=$(N) via systemd drop-in..."; \
 			sudo mkdir -p $(WRAP_DROPIN_DIR); \
-			printf '[Service]\nEnvironment=VK_VPN_TURN_WRAP=1\n' \
+			printf '[Service]\nEnvironment=VK_VPN_TURN_WRAP=%s\n' "$(N)" \
 				| sudo tee $(WRAP_DROPIN_FILE) > /dev/null; \
 			sudo systemctl daemon-reload; \
 			sudo systemctl restart vk-vpn-daemon; \
-			echo "WRAP enabled. Verify with: make wrap-show"; \
-			;; \
-		0) \
-			echo "Disabling VK_VPN_TURN_WRAP (removing drop-in)..."; \
-			sudo rm -f $(WRAP_DROPIN_FILE); \
-			sudo systemctl daemon-reload; \
-			sudo systemctl restart vk-vpn-daemon; \
-			echo "WRAP disabled. Verify with: make wrap-show"; \
+			echo "Done. Verify with: make wrap-show"; \
 			;; \
 		*) \
 			echo "N must be 0 or 1, got: $(N)"; exit 1; \
 			;; \
 	esac
+
+wrap-clear:
+	@echo "Removing WRAP drop-in (binary default ON will take effect)..."
+	@sudo rm -f $(WRAP_DROPIN_FILE)
+	@sudo systemctl daemon-reload
+	@sudo systemctl restart vk-vpn-daemon
+	@echo "Done. Verify with: make wrap-show"
 
 wrap-show:
 	@echo "=== Drop-in file ==="
@@ -114,13 +118,13 @@ wrap-show:
 		echo "Path: $(WRAP_DROPIN_FILE)"; \
 		sudo cat $(WRAP_DROPIN_FILE); \
 	else \
-		echo "(no drop-in present — WRAP disabled by default)"; \
+		echo "(no drop-in — binary default applies: WRAP ON)"; \
 	fi
 	@echo
 	@echo "=== Resolved unit Environment ==="
 	@sudo systemctl show vk-vpn-daemon -p Environment \
 		| sed 's/ /\n/g' | grep -E 'VK_VPN_TURN_WRAP|^Environment=' || \
-		echo "(VK_VPN_TURN_WRAP not present in resolved env)"
+		echo "(VK_VPN_TURN_WRAP not present in resolved env — binary default ON)"
 	@echo
 	@echo "=== Recent wrap log lines ==="
 	@sudo journalctl -u vk-vpn-daemon -n 200 --no-pager \

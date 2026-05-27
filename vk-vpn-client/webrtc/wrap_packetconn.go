@@ -160,15 +160,30 @@ func (w *WrapPacketConn) Stats() (wrappedOut, passOut, wrappedIn, passIn uint64)
 		w.wrappedIn.Load(), w.passIn.Load()
 }
 
-// TURNWrapEnabled reports whether VK_VPN_TURN_WRAP is set to a truthy
-// value. Defaults to false so the wrapper is strictly opt-in until
-// the experiment proves out.
+// TURNWrapEnabled reports whether the WRAP layer is active.
+//
+// Default: ON. Set VK_VPN_TURN_WRAP=0 (or false/no/off) to disable —
+// useful for back-to-back A/B against the same binary. Both peers
+// must agree on the flag, otherwise the inner DTLS handshake fails
+// because one side ciphers ChannelData payload and the other doesn't.
+//
+// The experiment that established this default (T-WRAP, 2026-05-27):
+// WRAP didn't lift the ~1.3 Mbps sustained ceiling in relay mode, so
+// the original DPI-payload-signature hypothesis is closed negative.
+// We keep the layer on by default anyway because it provides cheap
+// defense-in-depth obfuscation (the inner DTLS already handles
+// confidentiality and integrity) and the runtime cost is one
+// ChaCha20 keystream XOR per packet.
 func TURNWrapEnabled() bool {
-	switch os.Getenv("VK_VPN_TURN_WRAP") {
-	case "1", "true", "TRUE", "yes", "on":
+	v := os.Getenv("VK_VPN_TURN_WRAP")
+	if v == "" {
 		return true
 	}
-	return false
+	switch v {
+	case "0", "false", "FALSE", "no", "off":
+		return false
+	}
+	return true
 }
 
 // InstallTURNWrapMux attaches a wrapped UDP socket as the ICE UDP mux
@@ -187,7 +202,7 @@ func InstallTURNWrapMux(se *pion.SettingEngine, secret []byte, who string) (*Wra
 		return nil, errors.New("wrap: nil SettingEngine")
 	}
 	if !TURNWrapEnabled() {
-		log.Printf("[%s] turn-wrap: disabled (VK_VPN_TURN_WRAP not set)", who)
+		log.Printf("[%s] turn-wrap: disabled (VK_VPN_TURN_WRAP=0)", who)
 		return nil, nil
 	}
 	if len(secret) == 0 {
