@@ -116,7 +116,15 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	if err := me.RegisterDefaultCodecs(); err != nil {
 		return nil, err
 	}
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
+	// Test A (symmetric to joiner): register pion's default RTCP
+	// interceptor chain. Both peers must do this for TWCC feedback to
+	// reach the SFU's bandwidth estimator.
+	ir := vkwebrtc.InstallRTCPDefaults(me, "creator")
+	api := webrtc.NewAPI(
+		webrtc.WithSettingEngine(se),
+		webrtc.WithMediaEngine(me),
+		webrtc.WithInterceptorRegistry(ir),
+	)
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers:         ice,

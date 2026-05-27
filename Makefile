@@ -1,12 +1,14 @@
-.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy deploy-server deploy-daemon deploy-bot logs-daemon logs-bot wrap wrap-clear wrap-show
+.PHONY: build-server setup-bot systemd-install restart restart-server restart-bot deploy deploy-server deploy-daemon deploy-bot logs-daemon logs-bot wrap wrap-clear wrap-show rtcp rtcp-clear rtcp-show
 
 # Путь к проекту на сервере
 DIR = /opt/vk-vpn
 
 # Drop-in для оверрайда env'ов сервиса без правки основного unit-файла.
-# Удобно для toggle-флагов вроде VK_VPN_TURN_WRAP без `git diff`.
-WRAP_DROPIN_DIR  = /etc/systemd/system/vk-vpn-daemon.service.d
-WRAP_DROPIN_FILE = $(WRAP_DROPIN_DIR)/wrap.conf
+# Удобно для toggle-флагов вроде VK_VPN_TURN_WRAP / VK_VPN_RTCP_DEFAULTS без `git diff`.
+DROPIN_DIR       = /etc/systemd/system/vk-vpn-daemon.service.d
+WRAP_DROPIN_DIR  = $(DROPIN_DIR)
+WRAP_DROPIN_FILE = $(DROPIN_DIR)/wrap.conf
+RTCP_DROPIN_FILE = $(DROPIN_DIR)/rtcp.conf
 
 build-server:
 	@echo "Building Go daemon..."
@@ -130,3 +132,65 @@ wrap-show:
 	@sudo journalctl -u vk-vpn-daemon -n 200 --no-pager \
 		| grep -iE 'turn-wrap|VK_VPN_TURN_WRAP' | tail -10 || \
 		echo "(no wrap log lines in last 200 journal entries)"
+
+# Toggle pion default RTCP interceptor chain (NACK + TWCC + RR/SR)
+# on the server. Default in the binary is ON because Test A starts
+# with the missing-RTCP-feedback hypothesis as the working theory.
+# The drop-in is only needed to *disable* (N=0) for A/B comparison.
+#
+# Usage:
+#   make rtcp N=1     — explicit enable (writes VK_VPN_RTCP_DEFAULTS=1 drop-in)
+#   make rtcp N=0     — disable (writes VK_VPN_RTCP_DEFAULTS=0 drop-in)
+#   make rtcp-clear   — remove drop-in, restore binary default (= ON)
+#   make rtcp-show    — current state + recent log lines
+#
+# Client side (Windows) needs the same flag:
+#   default behaviour (ON):  no env var needed
+#   explicit disable:        PowerShell  $env:VK_VPN_RTCP_DEFAULTS = "0"
+#                            cmd.exe     set VK_VPN_RTCP_DEFAULTS=0
+rtcp:
+	@if [ -z "$(N)" ]; then \
+		echo "Usage: make rtcp N=1 (enable) or make rtcp N=0 (disable)"; \
+		echo "       make rtcp-clear to remove drop-in and restore binary default (ON)"; \
+		exit 1; \
+	fi; \
+	case "$(N)" in \
+		1|0) \
+			echo "Setting VK_VPN_RTCP_DEFAULTS=$(N) via systemd drop-in..."; \
+			sudo mkdir -p $(DROPIN_DIR); \
+			printf '[Service]\nEnvironment=VK_VPN_RTCP_DEFAULTS=%s\n' "$(N)" \
+				| sudo tee $(RTCP_DROPIN_FILE) > /dev/null; \
+			sudo systemctl daemon-reload; \
+			sudo systemctl restart vk-vpn-daemon; \
+			echo "Done. Verify with: make rtcp-show"; \
+			;; \
+		*) \
+			echo "N must be 0 or 1, got: $(N)"; exit 1; \
+			;; \
+	esac
+
+rtcp-clear:
+	@echo "Removing RTCP drop-in (binary default ON will take effect)..."
+	@sudo rm -f $(RTCP_DROPIN_FILE)
+	@sudo systemctl daemon-reload
+	@sudo systemctl restart vk-vpn-daemon
+	@echo "Done. Verify with: make rtcp-show"
+
+rtcp-show:
+	@echo "=== Drop-in file ==="
+	@if [ -f $(RTCP_DROPIN_FILE) ]; then \
+		echo "Path: $(RTCP_DROPIN_FILE)"; \
+		sudo cat $(RTCP_DROPIN_FILE); \
+	else \
+		echo "(no drop-in — binary default applies: RTCP defaults ON)"; \
+	fi
+	@echo
+	@echo "=== Resolved unit Environment ==="
+	@sudo systemctl show vk-vpn-daemon -p Environment \
+		| sed 's/ /\n/g' | grep -E 'VK_VPN_RTCP_DEFAULTS|^Environment=' || \
+		echo "(VK_VPN_RTCP_DEFAULTS not present in resolved env — binary default ON)"
+	@echo
+	@echo "=== Recent rtcp-defaults log lines ==="
+	@sudo journalctl -u vk-vpn-daemon -n 200 --no-pager \
+		| grep -iE 'rtcp-defaults|VK_VPN_RTCP_DEFAULTS' | tail -10 || \
+		echo "(no rtcp-defaults log lines in last 200 journal entries)"

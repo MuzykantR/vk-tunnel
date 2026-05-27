@@ -1,83 +1,76 @@
 # План: максимальный throughput vk-vpn в `relay` режиме
 
-**Status:** В работе. **Цель НЕ достигнута** (несмотря на промежуточный обнадёживающий замер).
+**Status:** В работе. **Цель НЕ достигнута.** Текущая фаза: T-A (RTCP defaults restoration).
 **Predecessor:** `docs/TRANSPORT_FIX_PLAN.md` — план «100% доставка» (закрыт ✅).
 **Current state:** см. `docs/TRANSPORT_AUDIT.md`.
 
-> **История:** baseline 1.3 Mbps → попытка отключить pion WebRTC GCC (env `VK_VPN_DISABLE_GCC=1`) → один прогон curl показал 52 Mbps за 13.9 сек. Я поспешно объявил победу, потом повторные прогоны вернули 0.5-2 Mbps. **52 Mbps был burst, не sustained.** Реальная картина: GCC throttling действительно проблема, но мой fix («просто убрать RTCPFeedback из codec») неполный — нужно правильно сконфигурировать GCC interceptor с floor + Pacer + DegradationPreference.
+> **История одной строкой:** baseline 1.3 Mbps → подозрение на GCC → пробовали отключить (T-GCC v1) + явно сконфигурировать (T-GCC v2) → оба не сработали → перешли к гипотезе DPI-сигнатуры на ChannelData payload → реализовали protocol-aware WRAP (T-WRAP) → **WRAP не помог**. После замера с мобильной сети cap локализован на **VK-стороне** (один и тот же ~1.3 Mbps с RefillRate ~140 KB/s и BurstSize ~600 KB на разных ISP). Текущая ставка — **отсутствие RTCP feedback** от receiver'а заставляет SFU держать default mobile-grade budget. Тест A это проверяет.
 
 ---
 
-## 0. TL;DR (актуально на 2026-05-26 поздно)
+## 0. TL;DR (актуально на 2026-05-27)
 
-- **Baseline на default config:** ~1.3 Mbps sustained.
-- **Лучший наблюдённый замер:** 52 Mbps за 13.9 сек curl — **burst**, не sustained.
-- **Sustained при «GCC off» (мой первый fix):** ~300-500 kbps по серверным логам.
-- **Корень проблемы (по Gemini analysis):** pion's WebRTC GCC + Pacer interceptors throttle'ят VP8 outbound rate под наблюдаемый «loss» от KCP retransmit bursts. Простое «убрать feedback из codec» — не отключает pacer и не задаёт floor для BWE.
-- **Правильный фикс (T-GCC v2):** регистрировать GCC interceptor **явно** с hardcoded floor `MinBitrate=10 Mbps, MaxBitrate=100+ Mbps`, использовать LeakyBucketPacer с 20 Mbps baseline, и зашить `DegradationPreference: Disabled` на RTPSender. **Сохранить TWCC живым** (SFU heartbeat).
-- **Цель:** sustained 5+ Mbps минимум, 10+ Mbps стрейч. **Не достигнута.**
-
----
-
-## 1. Что мы знаем после фейк-победы
-
-### Закрытые гипотезы (отрицательно или неактуально)
-
-| Гипотеза | Статус | Причина |
-|---|---|---|
-| H1 — KCP env-sweep | ❌ Опровергнута | Defaults оптимальны, sweep не дал прироста |
-| H4 — bonding | ❌ Закрыта отрицательно | RR + blocking write → stall на одном sub; per-session cap всё равно скорее всего есть |
-| H12 — vkturnproxy-стиль | ❌ Отменена | У них тот же ~1 Mbps cap без WRAP-обфускации; у нас другая природа |
-| H14 — QUIC-over-VP8 | ❌ Отменена | Anton48 (vkturnproxy) пробовал — то же что KCP |
-| H13 v1 — пустой InterceptorRegistry | ❌ Не работает стабильно | Дал 52 Mbps burst в одном прогоне, потом sustained просел до 0.3-0.5 Mbps |
-
-### Открытая основная гипотеза
-
-| Гипотеза | Статус | Источник |
-|---|---|---|
-| **H13 v2 — GCC interceptor с hardcoded floor + Pacer + DegradationPreference** | 🟢 Главная | Gemini analysis 2026-05-26 |
-
-Идея: НЕ удалять GCC interceptor (это ломает TWCC feedback → VK SFU считает клиента мёртвым → дропает сессию). Вместо этого:
-1. Зарегистрировать GCC явно с параметрами:
-   - `WithInitialStartBitrate(2 Mbps)` — для handshake/negotiation
-   - `WithMinBitrate(10 Mbps)` — floor, ниже которого pacer не опустится
-   - `WithMaxBitrate(150 Mbps)` — потолок
-   - `WithSendSideBWE(true)` — sender-side BWE активен (для совместимости)
-2. Использовать `LeakyBucketPacer` с 20 Mbps baseline serialization rate — равномерно выпускать пакеты, не создавать burst flood'ов которые ломают handshake.
-3. На каждом `RTPSender.GetParameters() → DegradationPreference=Disabled → SetParameters()` — pion не может «деградировать» rate динамически.
-4. **Сохранить TWCC feedback в SDP** — SFU нужен heartbeat.
+- **Baseline на default config:** ~1.3 Mbps sustained (одинаково в `tunnelMode=kcp` и `tunnelMode=video` в relay).
+- **Форма трафика:** token bucket с RefillRate ~140 KB/s + BurstSize ~600 KB. Бурсты до 280-350 KB/s (~2.8 Mbps) в течение 3-4 секунд, потом 5-6 секунд hold на baseline. Одинаково на домашнем WiFi и мобильном LTE → cap **не на пути от клиента к VK**.
+- **Что НЕ сработало:** KCP env-sweep (T1), bonding (T3 — RR+blocking dead-end), GCC tuning v1/v2 (T-GCC), protocol-aware WRAP с ChaCha20 на ChannelData payload (T-WRAP).
+- **Текущая рабочая гипотеза:** SFU не получает RTCP feedback (TWCC/NACK/RR) от нашего receiver'а потому что pion стартует с **пустым InterceptorRegistry**, держит per-track budget в самом низком профиле. Test A это проверяет — `RegisterDefaultInterceptors` на обеих сторонах.
+- **Альтернативная гипотеза (если T-A не сработает):** SFU делает bitstream-level parsing VP8 payload, видит мусор после первого байта (наш hardcoded fake header + ChaCha20-encrypted KCP внутри), clamp'ит в fallback bucket. Test B + C это проверяют.
+- **Цель:** sustained ≥ 5 Mbps минимум, ≥ 10 Mbps стрейч. **Не достигнута.**
 
 ---
 
-## 2. Поэтапный план
+## 1. Закрытые гипотезы (отрицательно)
 
-### Phase T-GCC v2 — Правильный GCC tuning (текущий приоритет)
-
-Файлы:
-- `vk-vpn-client/tunnel/codec_setup.go` — helper для сборки MediaEngine + Interceptor Registry с правильной конфигурацией
-- `vk-vpn-server/creator/session.go` — использовать helper, добавить DegradationPreference на VP8 sender
-- `vk-vpn-client/webrtc/joiner.go` — то же на клиенте
-- `go.mod` — может потребовать `github.com/pion/interceptor/pkg/gcc` и `.../pacer`
-
-### Phase T-FLAP — Robustness recovery (после T-GCC)
-
-При WS reset / call recycle / ICE flap сессия зависает. Это блокирует **долгие** замеры. Чинить SDP glare resolution в creator/p2p.go.
-
-### Phase T-FINAL — Замеры и фиксация
-
-После T-GCC v2:
-- Замер sustained на 92 MB curl × 3 подряд
-- Замер UL через Speedtest
-- Зашить env-defaults в systemd unit + Go defaults
-- THROUGHPUT_REPORT.md + AUDIT.md update
+| ID | Гипотеза | Статус | Причина закрытия |
+|---|---|---|---|
+| H1 | KCP env-sweep (WINDOW/FEC/NODELAY) | ❌ | T1: defaults оптимальны, все варианты хуже или шум |
+| H4 | Bonding 2+ KCP sub-tunnel'ов в одной сессии | ❌ | T3: RR+blocking write дедлок, плюс per-session cap всё равно скорее всего есть |
+| H11 | Per-track cap (probe keepalive 200/500 pps) | ❌ | T2: cover-traffic не влияет на curl throughput, cap не per-track |
+| H12 | vkturnproxy-стиль обфускации (без WebRTC) | ❌ | Архитектурно несовместимо с pion'ом в relay-mode |
+| H13 v1 | Пустой InterceptorRegistry (отключить всё) | ❌ | T-GCC v1: 52 Mbps был routing leak (VPN не поднялся), реальный sustained = 0.3-0.5 Mbps |
+| H13 v2 | GCC с hardcoded floor + LeakyBucketPacer | ❌ | T-GCC v2: UDP flood до DTLS handshake → SFU дропает сессию |
+| H14 | QUIC-over-VP8 | ❌ | Anton48 (vkturnproxy) уже пробовал — то же что KCP |
+| H15 | DPI шейпит ChannelData payload по сигнатуре | ❌ | T-WRAP: protocol-aware ChaCha20 на bytes 4+ не сдвинул cap. Либо VK уже обновил DPI, либо cap не от payload-signature |
 
 ---
 
-## 3. Acceptance criteria
+## 2. Текущая фаза: T-A — RTCP defaults restoration
 
-- **Минимум:** sustained ≥ 5 Mbps в curl 92 MB **× 3 подряд** (не один short burst).
-- **Стрейч:** sustained ≥ 10 Mbps.
-- **Не ломать:** 100% delivery; ICE handshake стабильный; SDP negotiation проходит.
+**Гипотеза:** pion без `RegisterDefaultInterceptors` — это «silent receiver». SFU не получает TWCC timing feedback, NACK loss reports, RR/SR. Без этих сигналов SFU **по умолчанию консервативен** и держит per-track budget на mobile-grade ~1.3 Mbps. Это **точно** соответствует форме нашего token bucket.
+
+**Реализация (ветка `feat/rtcp-defaults`):**
+- Новый файл `vk-vpn-client/webrtc/rtcp_defaults.go` — helper `InstallRTCPDefaults(me, who)` вызывает `webrtc.RegisterDefaultInterceptors(me, ir)` и возвращает Registry. Gated через `VK_VPN_RTCP_DEFAULTS` env, default ON.
+- `joiner.go` + `session.go` — передают полученный Registry в `webrtc.NewAPI(..., WithInterceptorRegistry(ir))`.
+- Makefile: `make rtcp N=0|1` / `make rtcp-clear` / `make rtcp-show` по аналогии с `make wrap`.
+
+**Что регистрируется:**
+- `nack.ResponderInterceptor` — receiver-side, отвечает NACK'ом на loss
+- `nack.GeneratorInterceptor` — sender-side, ретрансмит по NACK
+- `twcc.HeaderExtensionInterceptor` — sender-side, штампует RTP с transport-wide seq
+- `twcc.SenderInterceptor` — receiver-side, шлёт TWCC feedback с arrival times
+- `report.SenderInterceptor` / `report.ReceiverInterceptor` — стандартные RTCP SR/RR
+- **НЕ включён GCC pacer** — нам не нужно своё CC, нужно чтобы SFU своё повысил
+
+**Acceptance criteria T-A:**
+- Минимум: sustained > 2 Mbps × 3 прогона curl 92 MB
+- Хорошо: sustained ≥ 5 Mbps
+- Идеально: ≥ 10 Mbps (значит гипотеза попала точно)
+
+**Если T-A не сработает** — переходим к T-B (pseudo-valid VP8 prefix) перед коммитом в дорогой T-C.
+
+---
+
+## 3. Будущие фазы (запланированные, не начатые)
+
+### T-B — Pseudo-valid VP8 prefix
+**Идея:** заменить наш hardcoded `vp8Interframe` (17 байт фейкового header'а) на более структурно-плотный prefix с реальным VP8 uncompressed header'ом (frame_type=inter, show_frame=1, version=0). Partition 0 остаётся мусором. Цена: ~4-6 часов.
+
+**Решает:** проверка частичной чувствительности SFU к bitstream-валидности.
+
+### T-C — Full synthetic VP8 frame (Frankenstein Frame)
+**Идея:** реально валидный Partition 0 (макроблоки + motion vectors для статической картинки 1280×720), наш encrypted KCP инжектится **только в Partitions 1..N (DCT coefficients)**, где высокая энтропия ожидаема. Цена: 2-4 недели.
+
+**Решает:** полное прохождение SFU bitstream validation, если она существует. Делается **только** если T-A и T-B не дали результата.
 
 ---
 
@@ -85,26 +78,36 @@
 
 | Дата | Конфиг | curl avg | Тип | Комментарий |
 |---|---|---|---|---|
-| 2026-05-24 | bonding=1, GCC=on, defaults | 1.31 Mbps | sustained 10 мин | Hybrid-B первый замер |
-| 2026-05-25 | bonding=1, GCC=on, KCP-sweep | 1.18 Mbps avg | sustained × 4 | T1: env-tuning исчерпан |
-| 2026-05-25 | bonding=2, GCC=on | 0 Mbps (stall) | failed | T3: bonding broken (RR+blocking) |
-| 2026-05-26 12:00 | bonding=1, GCC=off (server only) | **52 Mbps** | **burst 13.9 сек** | Фейк-победа: один короткий замер |
-| 2026-05-26 14:30 | bonding=1, GCC=off (sym) | 0.5-1.0 Mbps | sustained | Возврат к baseline или хуже |
-| 2026-05-26 14:35 | bonding=1, GCC=off | 7 Mbps | burst 5 сек | Снова короткий burst |
-| 2026-05-26 14:40 | bonding=1, GCC=off | 0.68 Mbps | sustained | Стабильно низкая |
-
-**Вывод по замерам:** наблюдаемая «производительность» очень нестабильная (от 0.5 до 50 Mbps в зависимости от состояния канала и момента). Стабильный sustained на конфиге «GCC off (пустой interceptor registry)» — **хуже baseline**. Нужен **полный пакет** настроек GCC по Gemini.
-
----
-
-## 5. Что НЕ гарантировано
-
-1. **Sustained 5+ Mbps достижим**. Gemini рекомендация может тоже не сработать — pacer/BWE interactions с KCP burst-pattern'ом сложные. Может потребоваться custom NoOpPacer.
-2. **VK SFU отреагирует на high sustained rate**. Если мы выйдем на 20-30 Mbps стабильно, VK видит аномалию для «видеозвонка» и может начать шейпить наш паттерн.
-3. **DPI VK не следит за паттерном VP8 inside WebRTC**. У них с vkturnproxy DPI следит за паттерном TURN ChannelData, у нас другая природа трафика, но риск шейпинга **есть**.
+| 2026-05-24 | bonding=1, GCC=on, defaults | 1.31 Mbps | sustained 10 мин | Hybrid-B baseline |
+| 2026-05-25 | bonding=1, GCC=on, KCP-sweep × 4 | 0.51-1.35 Mbps | sustained | T1: env-tuning исчерпан |
+| 2026-05-25 | bonding=2 (RR dispatch) | 0 Mbps (stall) | failed | T3: blocking write deadlock |
+| 2026-05-26 | bonding=1, GCC=off (empty registry) | 0.5-1.0 Mbps | sustained | T-GCC v1: cap не снят |
+| 2026-05-26 | bonding=1, GCC v2 (hardcoded floor) | connection failed | failed | T-GCC v2: UDP flood до handshake |
+| 2026-05-27 | bonding=1, WRAP ON (ChaCha20 ChannelData) | ~1.3 Mbps | sustained | T-WRAP: cap не снят |
+| 2026-05-27 | WRAP ON, мобильная LTE сеть | 140 KB/s avg, 350 KB/s bursts | sustained | Cap локализован на VK-стороне |
+| **2026-05-27** | **WRAP ON, RTCP defaults ON** | **TBD** | **pending** | **Test A — ожидает замера** |
 
 ---
 
-## 6. Резюме одной строкой
+## 5. Что НЕ гарантировано (для T-A и далее)
 
-Cap ~1.3 Mbps **является артефактом WebRTC GCC**, но **простого "отключить" недостаточно** — нужна правильная конфигурация interceptor chain с hardcoded floor + дисциплинированный pacer + locked sender parameters. Реализация по Gemini analysis — в работе.
+1. **SFU реально использует RTCP feedback для upgrade'а budget'а.** Возможно VK SFU имеет жёсткий cap независимо от feedback'а — тогда T-A не поможет.
+2. **TWCC sender-side BWE не дерётся с SFU shaping.** Pion's TWCC может само начать throttle'ить когда видит «overcrowded» сигнал от собственного receiver'а (loopback effect через TURN).
+3. **NACK retransmits не подорвут KCP ARQ.** Pion может ретрансмитить пакеты которые KCP уже считает «потерянными и заретрансмитченными» — потенциально дублирование. На текущей пропускной способности не критично.
+
+---
+
+## 6. Архитектурные решения по итогам предыдущих фаз
+
+| Артефакт | Решение | Причина |
+|---|---|---|
+| `TURNWrapEnabled()` default | **ON** | Cheap defense-in-depth, не задерживает handshake, инфраструктура остаётся для возможного v2 inline-counter |
+| Pion's GCC interceptor | **Не использовать** (явно отключено) | Дрался с KCP CC, ломал bandwidth |
+| KCP `NoCongestion=1`, `Window=2048`, `FEC=10:3` | **Оптимум по T1** | Все альтернативы хуже |
+| `tunnelMode=kcp` (default через systemd) | **Сохранён** | Reliable delivery поверх unreliable VP8, ARQ + FEC компенсируют 3-6% physical loss |
+
+---
+
+## 7. Резюме одной строкой
+
+Cap ~1.3 Mbps **точно на VK-стороне** (одинаково на двух разных ISP). Форма — **token bucket с RefillRate ~140 KB/s** что говорит про **default mobile-grade per-track budget**. Текущая ставка: receiver не шлёт RTCP feedback → SFU держит низкий budget. Test A это проверяет за один прогон curl.

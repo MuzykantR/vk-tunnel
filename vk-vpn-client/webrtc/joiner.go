@@ -421,7 +421,17 @@ func (j *Joiner) initPC() {
 
 	me := &webrtc.MediaEngine{}
 	me.RegisterDefaultCodecs()
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))
+	// Test A: restore the default RTCP feedback chain so the SFU
+	// receives the timing-based BWE (TWCC) and loss reports it uses
+	// to size the per-track bandwidth budget. Without these signals
+	// the SFU stays in the conservative mobile-grade budget that
+	// produces our observed ~1.3 Mbps ceiling.
+	ir := InstallRTCPDefaults(me, "joiner")
+	api := webrtc.NewAPI(
+		webrtc.WithSettingEngine(se),
+		webrtc.WithMediaEngine(me),
+		webrtc.WithInterceptorRegistry(ir),
+	)
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers:         ice,
 		ICETransportPolicy: icePolicy,
