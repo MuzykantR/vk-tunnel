@@ -406,6 +406,19 @@ func (j *Joiner) initPC() {
 	icePolicy := ICETransportPolicyFromEnv()
 	ApplyICEPerformanceSettings(&se, icePolicy)
 
+	// Opt-in protocol-aware obfuscation for the TURN ChannelData
+	// payload. Hides the inner DTLS/WebRTC signature from on-path DPI
+	// without breaking the public VK TURN server (STUN + ChannelData
+	// header stay plaintext). Symmetric peer must run with the same
+	// VK_VPN_TURN_WRAP flag and join-link secret.
+	var wrapSecret []byte
+	if j.auth != nil {
+		wrapSecret = tunnel.DeriveSecretFromJoinLink(j.auth.JoinLink)
+	}
+	if _, err := InstallTURNWrapMux(&se, wrapSecret, "joiner"); err != nil {
+		log.Printf("Joiner: turn-wrap install failed: %v", err)
+	}
+
 	me := &webrtc.MediaEngine{}
 	me.RegisterDefaultCodecs()
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me))

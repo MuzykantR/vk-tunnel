@@ -102,6 +102,14 @@ func NewTunnelSession(ice []webrtc.ICEServer, opts SessionOpts) (*TunnelSession,
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
 	icePolicy := vkwebrtc.ICETransportPolicyFromEnv()
 	vkwebrtc.ApplyICEPerformanceSettings(&se, icePolicy)
+	// Opt-in protocol-aware obfuscation for TURN ChannelData payload —
+	// symmetric to the joiner side. Both peers derive the same key
+	// from the shared join-link secret; STUN and ChannelData headers
+	// remain plaintext so the VK TURN server routes normally.
+	if _, err := vkwebrtc.InstallTURNWrapMux(&se,
+		tunnel.DeriveSecretFromJoinLink(opts.JoinLink), "creator"); err != nil {
+		log.Printf("[creator] turn-wrap install failed: %v", err)
+	}
 	// Custom API must register codecs explicitly — otherwise AddTrack/CreateOffer
 	// fail with "RTPSender created with no codecs" (client joiner does the same).
 	me := &webrtc.MediaEngine{}
