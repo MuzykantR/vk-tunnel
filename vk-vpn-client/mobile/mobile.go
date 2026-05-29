@@ -26,8 +26,8 @@ func StartVPN(uri string, fd int, vp8Fps int, vp8Batch int) error {
 
 	log.Printf("Starting Android VPN | FD: %d | FPS: %d | Batch: %d", fd, vp8Fps, vp8Batch)
 
-	// 1. Parse URI
-	payload, err := parser.ParseAndDecryptURI(uri)
+	// 1. Parse URI — diag build accepts both myvpn:// and raw VK link.
+	payload, err := parser.ParseInputLink(uri)
 	if err != nil {
 		return err
 	}

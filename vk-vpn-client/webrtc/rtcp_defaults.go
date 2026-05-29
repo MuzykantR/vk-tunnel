@@ -25,36 +25,18 @@ package webrtc
 
 import (
 	"log"
-	"os"
 
 	"github.com/pion/interceptor"
 	pion "github.com/pion/webrtc/v3"
 )
 
-// RTCPDefaultsEnabled reports whether pion's default interceptor
-// chain (NACK + TWCC + RR/SR) should be registered. Default: ON.
-// Set VK_VPN_RTCP_DEFAULTS=0 to disable for back-to-back A/B testing
-// against the same binary.
-func RTCPDefaultsEnabled() bool {
-	v := os.Getenv("VK_VPN_RTCP_DEFAULTS")
-	if v == "" {
-		return true
-	}
-	switch v {
-	case "0", "false", "FALSE", "no", "off":
-		return false
-	}
-	return true
-}
-
 // InstallRTCPDefaults builds an interceptor.Registry populated with
 // pion's default chain and returns it. The caller passes the registry
 // to webrtc.NewAPI via webrtc.WithInterceptorRegistry.
 //
-// When the env-gate is off, returns an empty Registry. Pion treats an
-// empty Registry identically to no WithInterceptorRegistry call —
-// the wire behaviour is the same "silent receiver" we had before this
-// experiment.
+// On the diag/ru-vps-test branch this is unconditional — the
+// VK_VPN_RTCP_DEFAULTS=0 env-gate that lives on main is intentionally
+// absent so the test runs against the production baseline.
 //
 // The chain registered (per pion v3 RegisterDefaultInterceptors):
 //
@@ -74,10 +56,6 @@ func RTCPDefaultsEnabled() bool {
 // want the SFU to receive the standard feedback it expects.
 func InstallRTCPDefaults(me *pion.MediaEngine, who string) *interceptor.Registry {
 	ir := &interceptor.Registry{}
-	if !RTCPDefaultsEnabled() {
-		log.Printf("[%s] rtcp-defaults: disabled (VK_VPN_RTCP_DEFAULTS=0)", who)
-		return ir
-	}
 	if err := pion.RegisterDefaultInterceptors(me, ir); err != nil {
 		log.Printf("[%s] rtcp-defaults: RegisterDefaultInterceptors err: %v — falling back to empty registry", who, err)
 		return &interceptor.Registry{}

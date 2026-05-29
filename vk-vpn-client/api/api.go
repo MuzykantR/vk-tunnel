@@ -32,11 +32,13 @@ func SetSplitRouteRollback(fn func() bool) {
 // starts WebRTC. This call MUST happen before tun2socks is installed (because
 // it does HTTPS to api.vk.com and may open a browser for captcha).
 func ResolveSession(uri string) (*webrtc.AuthParams, []string, error) {
-	payload, err := parser.ParseAndDecryptURI(uri)
+	// Diag build: ParseInputLink accepts both myvpn:// (production
+	// envelope) and a raw VK call join-link (RU-VPS test workflow).
+	payload, err := parser.ParseInputLink(uri)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse URI: %w", err)
 	}
-	log.Printf("Successfully decrypted URI. Link: %s", payload.Link)
+	log.Printf("Successfully resolved input link. Link: %s", payload.Link)
 
 	auth, err := webrtc.ResolveJoinLink(payload.Link)
 	if err != nil {

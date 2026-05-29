@@ -36,7 +36,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"os"
 	"sync/atomic"
 
 	"github.com/pion/ice/v2"
@@ -160,36 +159,12 @@ func (w *WrapPacketConn) Stats() (wrappedOut, passOut, wrappedIn, passIn uint64)
 		w.wrappedIn.Load(), w.passIn.Load()
 }
 
-// TURNWrapEnabled reports whether the WRAP layer is active.
-//
-// Default: ON. Set VK_VPN_TURN_WRAP=0 (or false/no/off) to disable —
-// useful for back-to-back A/B against the same binary. Both peers
-// must agree on the flag, otherwise the inner DTLS handshake fails
-// because one side ciphers ChannelData payload and the other doesn't.
-//
-// The experiment that established this default (T-WRAP, 2026-05-27):
-// WRAP didn't lift the ~1.3 Mbps sustained ceiling in relay mode, so
-// the original DPI-payload-signature hypothesis is closed negative.
-// We keep the layer on by default anyway because it provides cheap
-// defense-in-depth obfuscation (the inner DTLS already handles
-// confidentiality and integrity) and the runtime cost is one
-// ChaCha20 keystream XOR per packet.
-func TURNWrapEnabled() bool {
-	v := os.Getenv("VK_VPN_TURN_WRAP")
-	if v == "" {
-		return true
-	}
-	switch v {
-	case "0", "false", "FALSE", "no", "off":
-		return false
-	}
-	return true
-}
-
 // InstallTURNWrapMux attaches a wrapped UDP socket as the ICE UDP mux
 // on the given SettingEngine, returning the live wrapper so callers
-// can pull diagnostics. If WRAP is disabled or the secret is empty
-// the SettingEngine is left untouched.
+// can pull diagnostics. On the diag/ru-vps-test branch the wrapper
+// is always installed when a secret is supplied — the env-gate that
+// lives on main (VK_VPN_TURN_WRAP=0) is intentionally absent so the
+// test runs against the exact baseline we observe in production.
 //
 // The underlying UDP socket binds to 0.0.0.0:0 — the kernel routing
 // table picks the egress interface at send time. We intentionally do
@@ -200,10 +175,6 @@ func TURNWrapEnabled() bool {
 func InstallTURNWrapMux(se *pion.SettingEngine, secret []byte, who string) (*WrapPacketConn, error) {
 	if se == nil {
 		return nil, errors.New("wrap: nil SettingEngine")
-	}
-	if !TURNWrapEnabled() {
-		log.Printf("[%s] turn-wrap: disabled (VK_VPN_TURN_WRAP=0)", who)
-		return nil, nil
 	}
 	if len(secret) == 0 {
 		log.Printf("[%s] turn-wrap: REQUESTED but no secret available — wrapper not installed", who)

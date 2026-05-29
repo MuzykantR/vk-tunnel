@@ -18,8 +18,23 @@ import (
 	"github.com/vk-vpn/client/logx"
 )
 
+// diagBannerLines is printed line-by-line via logx so every line gets
+// the project's standard `HH:MM:SS.mmm [tag]` prefix and routes
+// through the same log-level gate as the rest of the daemon. Picked
+// up by `make logs-daemon` / journald.
+var diagBannerLines = []string{
+	"*****************************************************************",
+	"*** DIAG BUILD — branch diag/ru-vps-test                      ***",
+	"*** RU-VPS cap-localisation test (Scenario A vs B/B.1/B.2).   ***",
+	"*** Do NOT deploy this binary to production VPSes.            ***",
+	"*****************************************************************",
+}
+
 func main() {
 	logx.Init()
+	for _, line := range diagBannerLines {
+		logx.Warn("boot", "%s", line)
+	}
 	cookiesPath := flag.String("cookies", "cookies.json", "Path to cookies.json file")
 	apiPort := flag.Int("port", 8080, "Local API port for the Bot")
 	resources := flag.String("resources", "default", "Resource mode: moderate | default | unlimited | custom (whitelist-bypass)")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -17,6 +18,47 @@ type VPNPayload struct {
 	Link     string `json:"link"`
 	TS       int64  `json:"ts"`
 	ServerPK string `json:"server_pk"`
+}
+
+// ParseInputLink accepts either the encrypted `myvpn://` envelope used
+// in production OR a raw VK call join-link copied straight from the
+// server daemon log. The raw-link branch exists for the RU-VPS
+// diagnostic build (branch diag/ru-vps-test): there is no
+// Telegram-bot in the loop so the operator simply pastes the URL from
+// `make logs-daemon` into the Wails client.
+//
+// This is a diagnostic branch only — the production build keeps the
+// strict myvpn:// requirement (`ParseAndDecryptURI`).
+func ParseInputLink(input string) (*VPNPayload, error) {
+	input = strings.TrimSpace(input)
+	if strings.HasPrefix(input, "myvpn://") {
+		return ParseAndDecryptURI(input)
+	}
+	if isVKJoinLink(input) {
+		log.Printf("[diag] raw VK join-link accepted (diag/ru-vps-test build)")
+		return &VPNPayload{Link: input, TS: time.Now().Unix()}, nil
+	}
+	return nil, errors.New("invalid URI: expected myvpn:// or https://vk.com/call/join/<token>")
+}
+
+// isVKJoinLink recognises the canonical VK call invite URLs. The
+// trailing token must be non-empty and contain no whitespace.
+func isVKJoinLink(s string) bool {
+	for _, prefix := range []string{
+		"https://vk.com/call/join/",
+		"https://vk.ru/call/join/",
+		"http://vk.com/call/join/",
+	} {
+		if !strings.HasPrefix(s, prefix) {
+			continue
+		}
+		tail := strings.TrimRight(strings.TrimPrefix(s, prefix), "/")
+		if tail == "" || strings.ContainsAny(tail, " \t\r\n") {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // ParseAndDecryptURI extracts the payload from a myvpn:// URI.
